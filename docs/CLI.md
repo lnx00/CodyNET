@@ -58,12 +58,16 @@ the program. The arrow next to the Run button selects how it is started:
 | Run mode | What happens | Time to start (1 MHz) |
 |---|---|---|
 | **BASIC** (default) | Reset the CPU, type `LOAD 1,1` into CodyBASIC, send the binary over UART1, the same steps as doing it by hand | ~1.8 s |
-| **Cartridge** | Load the binary (start/end header) straight into memory and start it, skipping BASIC, like `run --as-cartridge` | immediate |
+| **Cartridge** | Boot like the Cody does with a cartridge plugged in: reset into the ROM, let it initialize the system, then load the binary and start it instead of BASIC | ~0.2 s |
 
-Both modes expect the binary to begin with the 4-byte start/end address header. In cartridge mode
-BASIC never runs, so nothing it normally sets up (screen, interrupt handler, keyboard scanning) is
-initialized, and RAM keeps whatever the previous run left there. Unlike `run --as-cartridge`, the
-reset vector is left untouched, so **CPU Reset** and BASIC mode still boot into CodyBASIC.
+Both modes expect the binary to begin with the 4-byte start/end address header.
+
+In cartridge mode the ROM's `INIT` routine runs first, exactly as on real hardware: it copies the
+character set, resets the video registers, clears the screen and sets up the VIA timer. When the ROM
+checks for a cartridge, the IDE loads your binary and jumps to it (interrupts still disabled), so
+nothing a previous program drew is left over. The reset vector is left untouched, so **CPU Reset**
+and BASIC mode still boot into CodyBASIC. With a ROM that has no recognizable cartridge check, the
+binary is started directly without initialization (a warning is logged).
 
 If assembling fails, nothing is reset and the problems are listed in the **Errors** tab.
 

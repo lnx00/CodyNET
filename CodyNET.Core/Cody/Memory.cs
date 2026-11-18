@@ -214,6 +214,17 @@ public class Memory
         };
     }
     
+    /// <summary>
+    /// Searches the ROM ($E000-$FFFF) for a byte sequence, bypassing memory-mapped devices.
+    /// </summary>
+    /// <returns>True if found; <paramref name="address"/> is the address of its first byte.</returns>
+    public bool TryFindInRom(ReadOnlySpan<byte> pattern, out ushort address)
+    {
+        var index = _rom.AsSpan().IndexOf(pattern);
+        address = index >= 0 ? (ushort)(0xE000 + index) : (ushort)0;
+        return index >= 0;
+    }
+
     public void ForceWrite(ushort address, byte value)
     {
         bool oldRomWritable = RomIsWritable;

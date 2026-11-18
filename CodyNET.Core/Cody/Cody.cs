@@ -197,11 +197,23 @@ public class Cody
         Resume(); // The sequence only advances while the CPU runs
     }
 
+    // First instructions of CodyBASIC's CARTCHECK routine (LDA #$0D / STA VIA_PCR / LDA VIA_IORA /
+    // LDA #$0F / STA VIA_PCR). Located by content rather than a fixed address, so a ROM rebuild
+    // that moves the routine still works.
+    private static readonly byte[] CartCheckSignature =
+        [0xA9, 0x0D, 0x8D, 0x0C, 0x9F, 0xAD, 0x01, 0x9F, 0xA9, 0x0F, 0x8D, 0x0C, 0x9F];
+    // Measured: the ROM reaches CARTCHECK 206,607 cycles after reset (after INIT has run).
+    private const long CartCheckTimeoutCycles = 1_000_000;
+
     /// <summary>
-    /// Runs <paramref name="cartridgeFile"/> like <c>run --as-cartridge</c>: the image (with its
-    /// start/end header) is written straight into memory and the CPU is reset into it, skipping
-    /// CodyBASIC entirely. Unlike the CLI, the reset vector is not modified, so a later CPU reset
-    /// (or <see cref="RunViaBasicLoad"/>) still boots into BASIC. Thread-safe like RunViaBasicLoad.
+    /// Runs <paramref name="cartridgeFile"/> the way the Cody boots a cartridge: the CPU is reset
+    /// into the ROM, which runs INIT (copies the character set, resets the video registers, clears
+    /// the screen, sets up the VIA timer). When the ROM checks for a cartridge (CARTCHECK), the
+    /// image (with its start/end header) is loaded and started instead of BASIC, just like the
+    /// ROM's own cartridge path. Takes ~0.2 s of emulated time at 1 MHz.
+    /// The reset vector is not modified, so CPU reset and <see cref="RunViaBasicLoad"/> still boot
+    /// into BASIC. If the ROM has no recognizable CARTCHECK, the image is started directly (without
+    /// INIT). Thread-safe like RunViaBasicLoad.
     /// </summary>
     /// <exception cref="InvalidDataException">The file has no valid cartridge header.</exception>
     public void RunAsCartridge(FileInfo cartridgeFile)
@@ -223,14 +235,43 @@ public class Cody
             Log.Warn("Cartridge {File} overlaps the CodyBASIC ROM area ($E000-$FFFF); BASIC may not boot until the emulator is restarted", cartridgeFile.Name);
 
         var keyboard = Keyboard;
-        var sequence = new InputSequence().Then(0, () =>
+        void StartDirectly(string reason)
         {
-            keyboard?.ReleaseAllKeys();
+            Log.Warn("Cartridge run: {Reason}; starting {File} directly without ROM initialization", reason, cartridgeFile.Name);
             LoadImage(image, start);
             Cpu.ResetToAddress(entry);
-            Log.Info("Cartridge run: loaded {File} at ${Start:X4}-${End:X4}, starting at ${Entry:X4}",
-                cartridgeFile.Name, start, end, entry);
-        });
+        }
+
+        InputSequence sequence;
+        if (!Memory.TryFindInRom(CartCheckSignature, out var cartCheck))
+        {
+            sequence = new InputSequence().Then(0, () =>
+            {
+                keyboard?.ReleaseAllKeys();
+                StartDirectly("CodyBASIC's cartridge check was not found in ROM");
+            });
+        }
+        else
+        {
+            sequence = new InputSequence()
+                .Then(0, () =>
+                {
+                    keyboard?.ReleaseAllKeys();
+                    Cpu.Reset(); // Boot the ROM: MAIN -> INIT -> CARTCHECK
+                })
+                .ThenWhen(() => Cpu.PC == cartCheck, CartCheckTimeoutCycles,
+                    action: () =>
+                    {
+                        // Act as if a cartridge is plugged in: load it and jump to it, like the
+                        // ROM's LOADBIN does. Drop the return address of MAIN's JSR CARTCHECK.
+                        LoadImage(image, start);
+                        Cpu.S = (byte)(Cpu.S + 2);
+                        Cpu.PC = entry;
+                        Log.Info("Cartridge run: ROM initialized, loaded {File} at ${Start:X4}-${End:X4}, starting at ${Entry:X4}",
+                            cartridgeFile.Name, start, end, entry);
+                    },
+                    onTimeout: () => StartDirectly("the ROM did not reach its cartridge check"));
+        }
 
         Volatile.Write(ref _inputSequence, sequence);
         Resume();

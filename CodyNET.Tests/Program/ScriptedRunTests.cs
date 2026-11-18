@@ -74,21 +74,54 @@ public class ScriptedRunTests
         Assert.Throws<ArgumentException>(() => cody.RunViaBasicLoad(new FileInfo("x.bin"), "LOAD ~"));
     }
 
+    // Default video setup written by the ROM's INIT: VID_BPTR $95 -> screen at $C400, characters at $C800
+    private const ushort ScreenRam = 0xC400;
+    private const ushort CharacterRam = 0xC800;
+    private const ushort VidControl = 0xD001;
+    private const ushort VidBasePointer = 0xD003;
+
     [Test]
-    public void RunAsCartridge_StartsProgramImmediatelyAndKeepsResetVector()
+    public void RunAsCartridge_ResetsSystemLikeRealCartridgeBoot()
     {
         var binary = AssembleMarkerProgram("marker", 0x42);
         var cody = CreateBootedCody();
         var romResetVector = ReadResetVector(cody);
 
+        // Leftovers from a "previous program": junk on screen, other video bank, bitmap mode on
+        for (ushort a = ScreenRam; a < ScreenRam + 1000; a++)
+            cody.Memory.Write(a, (byte)'Z');
+        cody.Memory.Write(VidBasePointer, 0x00);
+        cody.Memory.Write(VidControl, 0x20);
+
         cody.RunAsCartridge(binary);
         RunUntilStp(cody, "Cartridge program never reached STP.");
 
         Assert.That(cody.Memory.Read(MarkerAddress), Is.EqualTo(0x42));
-        // The CPU reset zeroes the cycle counter, so this counts cycles since the run started:
-        // lda + sta + stp, i.e. it started right at the program without booting BASIC first
-        Assert.That(cody.Cpu.TotalCyclesExecuted, Is.LessThan(100));
-        Assert.That(ReadResetVector(cody), Is.EqualTo(romResetVector), "Reset vector must still point into BASIC");
+        Assert.Multiple(() =>
+        {
+            // ROM INIT ran before the program started
+            Assert.That(Enumerable.Range(ScreenRam, 1000).Count(a => cody.Memory.Read((ushort)a) == 'Z'), Is.Zero, "Screen not cleared");
+            Assert.That(cody.Memory.Read(VidBasePointer), Is.EqualTo(0x95), "Video base pointer not reset");
+            Assert.That(cody.Memory.Read(VidControl), Is.Zero, "Video control register not reset");
+            Assert.That(Enumerable.Range(CharacterRam, 2048).Any(a => cody.Memory.Read((ushort)a) != 0), Is.True, "Character set not copied");
+            // Cycles since the reset: ROM init (~207k) but no BASIC boot + typing (~1.8M)
+            Assert.That(cody.Cpu.TotalCyclesExecuted, Is.InRange(200_000, 300_000));
+            Assert.That(ReadResetVector(cody), Is.EqualTo(romResetVector), "Reset vector must still point into BASIC");
+        });
+    }
+
+    [Test]
+    public void RunAsCartridge_StartsDirectlyWhenRomHasNoCartridgeCheck()
+    {
+        var binary = AssembleMarkerProgram("marker", 0x42);
+        // No ROM loaded at all, so there is no CARTCHECK routine to wait for
+        var cody = new Cody(new CodySetupOptions { EnableScreen = false, EnableDebugger = false, FrequencyHz = -1 });
+
+        cody.RunAsCartridge(binary);
+        RunUntilStp(cody, "Cartridge program never reached STP.");
+
+        Assert.That(cody.Memory.Read(MarkerAddress), Is.EqualTo(0x42));
+        Assert.That(cody.Cpu.TotalCyclesExecuted, Is.LessThan(100), "Should start right at the program");
     }
 
     [Test]
