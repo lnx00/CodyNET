@@ -221,6 +221,38 @@ public class Keyboard
     {
         return SetKeyState(keyName, keySymbolName, true);
     }
+
+    /// <summary>
+    /// Presses or releases the Cody key combination that produces <paramref name="character"/>
+    /// ('\n' = RETURN). Used for scripted typing; independent of <see cref="UsePhysicalKeyboard"/>.
+    /// </summary>
+    /// <returns>False if the character has no mapping on the Cody keyboard.</returns>
+    public bool TypeCharacter(char character, bool pressed)
+    {
+        if (!TryGetCharacterMapping(character, out var mapping))
+            return false;
+
+        var modifierKey = modifierToKey(mapping.modifier);
+        if (modifierKey.HasValue)
+            KeyState.SetPressed(modifierKey.Value, pressed);
+        KeyState.SetPressed(mapping.code, pressed);
+        return true;
+    }
+
+    public bool CanType(char character) => TryGetCharacterMapping(character, out _);
+
+    public void ReleaseAllKeys() => KeyState.ReleaseAll();
+
+    private bool TryGetCharacterMapping(char character, out (CodyKeyCode code, CodyModifier modifier) mapping)
+    {
+        var name = character switch
+        {
+            '\n' => "Enter",
+            ' ' => "Space",
+            _ => char.ToUpperInvariant(character).ToString()
+        };
+        return logicalMap.TryGetValue(name, out mapping);
+    }
     
     public bool KeyUp(string keyName, string? keySymbolName)
     {

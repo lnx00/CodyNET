@@ -27,6 +27,7 @@ using CodyNET.Core.Cody;
 using CodyNET.Core.Devices;
 using CodyNET.Frontend.Controls;
 using MsBox.Avalonia;
+using MsBox.Avalonia.Enums;
 using Math = System.Math;
 
 namespace CodyNET.Frontend;
@@ -118,11 +119,13 @@ public partial class MainWindow : Window
         var debugMode = FrontendHostBridge.DebugMode;
         DebugMenu.IsVisible = debugMode;
         LoadAssemblyMenuItem.IsVisible = debugMode;
+        RunAssemblyMenuItem.IsVisible = debugMode;
         SetDebugUiActive(debugMode);
         RefreshRegisterValues();
         SetMemoryViewStart(0);
         RefreshBreakpointsPanel();
         SetErrorList([], NoErrorsText);
+        SetRunMode(_runMode); // Sync button label, menu header and tooltip
         SyncInitialClockFrequency();
         registerRefreshTimer?.Start();
         footerRefreshTimer?.Start();
@@ -641,14 +644,20 @@ public partial class MainWindow : Window
         FrontendHostBridge.SetRunState(1);
     }
     
-    private List<Key> DebuggerControlKeys = new() { Key.F8, Key.F9 };
+    private List<Key> DebuggerControlKeys = new() { Key.F5, Key.F8, Key.F9 };
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
     {
         try
         {
-            switch (e.Key) // Handle special debugger buttons (F8, F9)
+            switch (e.Key) // Handle special debugger buttons (F5, F8, F9)
             {
+                // Assemble & run the editor program
+                case Key.F5:
+                    if (_debugUiActive)
+                        _ = RunEditorProgramAsync();
+                    e.Handled = true;
+                    return;
                 // Pause/Resume
                 case Key.F9:
                     OnPauseResumeButtonClick(sender, e);
@@ -991,38 +1000,15 @@ public partial class MainWindow : Window
             return;
         }
 
-        string sourceText;
-        try
+        if (!TryReadSource(fileInfo, out var codeLines, out var breakpointLines))
         {
-            _codeLines = File.ReadAllLines(fileInfo.FullName).ToList();
-        }
-        catch (Exception ex)
-        {
-            Log.Error(ex, "Failed to read source file {File}", fileInfo.FullName);
             MessageBox("Load Error", $"Could not read source file:\n{fileInfo.FullName}");
             return;
         }
-        
-        _codeEditorBreakpointLines.Clear();
 
-        var codeLinesProcessed = new List<string>();
-        var breakpointLines = new List<int>();
-        for(int i = 0; i < _codeLines.Count; i++)
-        {
-            var line = _codeLines[i];
-            if (line.Contains("DBP", StringComparison.OrdinalIgnoreCase))
-            {
-                // The breakpoint belongs to the next non-DBP line, which will land at
-                // codeLinesProcessed.Count + 1 (1-based) in the stripped output.
-                breakpointLines.Add(codeLinesProcessed.Count + 1);
-            }
-            else
-            {
-                codeLinesProcessed.Add(line);
-            }
-        }
-        _codeLines = codeLinesProcessed;
-        sourceText = string.Join(Environment.NewLine, _codeLines);
+        _codeEditorBreakpointLines.Clear();
+        _codeLines = codeLines;
+        var sourceText = string.Join(Environment.NewLine, _codeLines);
 
         AddMultipleBreakpoints(breakpointLines.ToArray());
 
@@ -1036,8 +1022,183 @@ public partial class MainWindow : Window
         SetErrorList([], NoErrorsText);
 
         SetCodePanelState(fileInfo.Name, sourceText);
-        CompileAssemblyButton.IsEnabled = true;
+        SetAssemblyButtonsEnabled(true);
         SendAssemblyOverUartButton.IsEnabled = false;
+        WatchSourceFile(fileInfo);
+    }
+
+    /// <summary>
+    /// Reads a source file and strips DBP lines, returning them as breakpoints on the following line.
+    /// Retries briefly because an external editor may still be writing the file.
+    /// </summary>
+    private static bool TryReadSource(FileInfo fileInfo, out List<string> codeLines, out List<int> breakpointLines)
+    {
+        codeLines = [];
+        breakpointLines = [];
+
+        string[]? rawLines = null;
+        for (var attempt = 1; rawLines is null; attempt++)
+        {
+            try
+            {
+                rawLines = File.ReadAllLines(fileInfo.FullName);
+            }
+            catch (IOException) when (attempt < 5)
+            {
+                Thread.Sleep(50); // File is probably still locked by the editor saving it
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to read source file {File}", fileInfo.FullName);
+                return false;
+            }
+        }
+
+        foreach (var line in rawLines)
+        {
+            if (line.Contains("DBP", StringComparison.OrdinalIgnoreCase))
+            {
+                // The breakpoint belongs to the next non-DBP line, which will land at
+                // codeLines.Count + 1 (1-based) in the stripped output.
+                breakpointLines.Add(codeLines.Count + 1);
+            }
+            else
+            {
+                codeLines.Add(line);
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Replaces the editor contents with the file on disk, keeping caret, scroll position and
+    /// breakpoints (except those past the new end of file). Discards unsaved editor changes.
+    /// </summary>
+    /// <returns>True if the editor contents changed.</returns>
+    private bool ReloadEditorFromDisk()
+    {
+        if (_loadedAssemblyPath is null)
+            return false;
+
+        var fileInfo = new FileInfo(_loadedAssemblyPath);
+        if (!fileInfo.Exists || !TryReadSource(fileInfo, out var codeLines, out var breakpointLines))
+            return false;
+
+        var newText = string.Join(Environment.NewLine, codeLines);
+        static string Normalize(string? text) => (text ?? string.Empty).Replace("\r\n", "\n");
+        if (Normalize(newText) == Normalize(CodeEditorTextBox.Text))
+            return false; // Nothing changed (e.g. a save without edits)
+
+        var caretOffset = CodeEditorTextBox.CaretOffset;
+        var verticalOffset = CodeEditorTextBox.VerticalOffset;
+
+        _codeLines = codeLines;
+        _suppressCodeEditorEvents = true;
+        CodeEditorTextBox.Text = newText;
+        _suppressCodeEditorEvents = false;
+        _isAssemblyDirty = false;
+        _addressToSourceLine.Clear(); // Mapping belongs to the old text
+        ClearErrorHighlights();
+
+        foreach (var line in _codeEditorBreakpointLines.Keys.Where(line => line > codeLines.Count).ToList())
+            _codeEditorBreakpointLines.Remove(line);
+        AddMultipleBreakpoints(breakpointLines.ToArray());
+
+        CodeEditorTextBox.CaretOffset = Math.Min(caretOffset, CodeEditorTextBox.Document.TextLength);
+        // Restore scrolling after the new text has been laid out
+        Dispatcher.UIThread.Post(() => CodeEditorTextBox.ScrollToVerticalOffset(verticalOffset), DispatcherPriority.Background);
+
+        SetCodePanelState(fileInfo.Name, newText);
+        SendAssemblyOverUartButton.IsEnabled = false; // The previously assembled binary is stale now
+        Log.Info("Reloaded {File} from disk", fileInfo.FullName);
+        return true;
+    }
+
+    private FileSystemWatcher? _sourceWatcher;
+    private CancellationTokenSource? _reloadDebounce;
+
+    /// <summary>
+    /// Watches the loaded source file so saves from an external editor show up in the IDE.
+    /// </summary>
+    private void WatchSourceFile(FileInfo fileInfo)
+    {
+        _sourceWatcher?.Dispose();
+        _sourceWatcher = null;
+
+        if (fileInfo.DirectoryName is not { } directory)
+            return;
+
+        var target = fileInfo.FullName;
+        void OnFileEvent(string path)
+        {
+            if (string.Equals(Path.GetFullPath(path), target, StringComparison.OrdinalIgnoreCase))
+                Dispatcher.UIThread.Post(ScheduleReloadFromDisk);
+        }
+
+        try
+        {
+            // Watch the whole folder: editors such as Sublime Text save "atomically" by writing a
+            // temp file and renaming it over the original, which a filename filter can miss.
+            var watcher = new FileSystemWatcher(directory)
+            {
+                IncludeSubdirectories = false,
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size
+            };
+            watcher.Changed += (_, e) => OnFileEvent(e.FullPath);
+            watcher.Created += (_, e) => OnFileEvent(e.FullPath);
+            watcher.Renamed += (_, e) => OnFileEvent(e.FullPath);
+            watcher.EnableRaisingEvents = true;
+            _sourceWatcher = watcher;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Could not watch {File} for changes: {Message}", target, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Debounces file events (one save raises several) and reloads the editor. Asks first if the
+    /// editor has changes that would be lost.
+    /// </summary>
+    private async void ScheduleReloadFromDisk()
+    {
+        _reloadDebounce?.Cancel();
+        var debounce = _reloadDebounce = new CancellationTokenSource();
+        try
+        {
+            await Task.Delay(250, debounce.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (_isAssembling)
+        {
+            ScheduleReloadFromDisk(); // Don't swap the text while it is being assembled
+            return;
+        }
+
+        try
+        {
+            if (_isAssemblyDirty)
+            {
+                var answer = await MessageBoxManager.GetMessageBoxStandard(
+                        "File changed on disk",
+                        $"{GetLoadedAssemblyFileName()} was changed outside the IDE.\n\nReload it and discard your changes in the editor?",
+                        ButtonEnum.YesNo)
+                    .ShowWindowDialogAsync(this);
+                if (answer != ButtonResult.Yes)
+                    return;
+            }
+
+            ReloadEditorFromDisk();
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Reloading source file failed");
+        }
     }
     
     private void SetCodePanelState(string? fileName, string? sourceText)
@@ -1075,6 +1236,20 @@ public partial class MainWindow : Window
 
     private async void OnCompileAssemblyClick(object? sender, RoutedEventArgs e)
     {
+        await AssembleEditorAsync();
+    }
+
+    private bool _isAssembling;
+
+    /// <summary>
+    /// Assembles the editor contents. Errors go to the Errors tab.
+    /// </summary>
+    /// <returns>The assembled binary, or null if assembling failed or is already running.</returns>
+    private async Task<FileInfo?> AssembleEditorAsync()
+    {
+        if (_isAssembling || originalAssemblyFile is null)
+            return null;
+
         // Always read directly from the editor so edits are never missed.
         var editorLines = (CodeEditorTextBox.Text ?? string.Empty)
             .Split('\n')
@@ -1113,14 +1288,15 @@ public partial class MainWindow : Window
 
         // Assemble off the UI thread; any failure (bad syntax, missing 64tass, timeout, I/O)
         // is reported to the user instead of escaping the event handler and killing the app.
-        CompileAssemblyButton.IsEnabled = false;
+        _isAssembling = true;
+        SetAssemblyButtonsEnabled(false);
         SendAssemblyOverUartButton.IsEnabled = false;
         ClearErrorHighlights();
         SetErrorList([], "Assembling...");
         try
         {
             await File.WriteAllTextAsync(inputFile.FullName, sourceText);
-            var (_, addressToPreLine) = await CodyAssembler.AssembleFileWithMapAsync(inputFile, originalAssemblyFile);
+            var (output, addressToPreLine) = await CodyAssembler.AssembleFileWithMapAsync(inputFile, originalAssemblyFile);
 
             // Combine: address -> pre.asm line -> original editor line
             _addressToSourceLine = new Dictionary<ushort, int>();
@@ -1132,11 +1308,13 @@ public partial class MainWindow : Window
 
             SetErrorList([], "Assembled successfully. No errors.");
             SendAssemblyOverUartButton.IsEnabled = true;
+            return output;
         }
         catch (AssemblerException ex)
         {
             Log.Error(ex, "Assembling {file} failed", inputFile.FullName);
             ShowAssemblerErrors(ex, inputFile, preAsmLineToSourceLine);
+            return null;
         }
         catch (Exception ex)
         {
@@ -1144,10 +1322,99 @@ public partial class MainWindow : Window
             Log.Error(ex, "Assembling {file} failed", inputFile.FullName);
             SetErrorList([new ErrorListEntry(AssemblerDiagnosticSeverity.Error, null, 0, ex.Message, null)], NoErrorsText);
             LowerPanelTabs.SelectedItem = ErrorsTab;
+            return null;
         }
         finally
         {
-            CompileAssemblyButton.IsEnabled = true;
+            _isAssembling = false;
+            SetAssemblyButtonsEnabled(true);
+        }
+    }
+
+    private void SetAssemblyButtonsEnabled(bool enabled)
+    {
+        CompileAssemblyButton.IsEnabled = enabled;
+        RunAssemblyButton.IsEnabled = enabled;
+        RunAssemblyMenuItem.IsEnabled = enabled;
+    }
+
+    private void OnRunAssemblyClick(object? sender, RoutedEventArgs e)
+    {
+        _ = RunEditorProgramAsync();
+    }
+
+    /// <summary>How Run [F5] gets the assembled program into the emulator.</summary>
+    private enum RunMode
+    {
+        /// <summary>Reset into CodyBASIC, type LOAD 1,1, send the binary over UART1 (like on hardware).</summary>
+        Basic,
+        /// <summary>Write the image straight into memory and start it, skipping BASIC (like --as-cartridge).</summary>
+        Cartridge
+    }
+
+    private RunMode _runMode = RunMode.Basic;
+
+    private void OnRunModeClick(object? sender, RoutedEventArgs e)
+    {
+        SetRunMode(sender == RunModeCartridgeItem ? RunMode.Cartridge : RunMode.Basic);
+    }
+
+    private void SetRunMode(RunMode mode)
+    {
+        _runMode = mode;
+        RunModeBasicItem.IsChecked = mode == RunMode.Basic;
+        RunModeCartridgeItem.IsChecked = mode == RunMode.Cartridge;
+
+        var (label, header, tip) = mode switch
+        {
+            RunMode.Cartridge => ("▶ Cart [F5]", "_Run Assembly as Cartridge [F5]",
+                "Assemble, load directly into memory and start, skipping BASIC [F5]"),
+            _ => ("▶ BASIC [F5]", "_Run Assembly via BASIC [F5]",
+                "Assemble, reset, type LOAD 1,1 and send over UART [F5]"),
+        };
+        RunAssemblyButton.Content = label;
+        RunAssemblyMenuItem.Header = header;
+        ToolTip.SetTip(RunAssemblyButton, tip);
+    }
+
+    /// <summary>
+    /// Run [F5]: picks up the latest saved file, assembles it and, if that succeeds, starts it in
+    /// the selected <see cref="RunMode"/>.
+    /// </summary>
+    private async Task RunEditorProgramAsync()
+    {
+        if (_isAssembling || originalAssemblyFile is null)
+            return;
+
+        try
+        {
+            // The file watcher reloads on save, but F5 right after saving can beat its debounce.
+            if (!_isAssemblyDirty)
+                ReloadEditorFromDisk();
+
+            var binary = await AssembleEditorAsync();
+            if (binary is null)
+                return; // Errors are in the Errors tab
+
+            var mode = _runMode;
+            var started = mode == RunMode.Cartridge
+                ? FrontendHostBridge.RunAsCartridge(binary)
+                : FrontendHostBridge.RunViaBasicLoad(binary);
+            if (!started)
+            {
+                Log.Warn("Run requested but no emulator is attached");
+                return;
+            }
+
+            if (mode == RunMode.Basic)
+                SendAssemblyOverUartButton.IsEnabled = false; // Already sent as part of the run
+            Log.Info("Running {file} ({mode})", binary.FullName, mode);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Run failed");
+            SetErrorList([new ErrorListEntry(AssemblerDiagnosticSeverity.Error, null, 0, $"Run failed: {ex.Message}", null)], NoErrorsText);
+            LowerPanelTabs.SelectedItem = ErrorsTab;
         }
     }
 
@@ -1248,13 +1515,25 @@ public partial class MainWindow : Window
         var isWarning = entry.Severity == AssemblerDiagnosticSeverity.Warning;
         var row = CreateErrorRowGrid();
 
-        var icon = new TextBlock
+        // Drawn badge instead of a symbol glyph: Windows renders ✖/⚠ from the emoji font in its own colors.
+        var icon = new Border
         {
-            Text = isWarning ? "⚠" : "✖",
-            Foreground = Brush.Parse(isWarning ? "#FFCC3E" : "#FF5A5A"),
-            FontSize = 14,
+            Width = 16,
+            Height = 16,
+            CornerRadius = new CornerRadius(8),
+            Background = Brush.Parse(isWarning ? "#E0A800" : "#E5484D"),
             VerticalAlignment = VerticalAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center,
+            Child = new TextBlock
+            {
+                Text = isWarning ? "!" : "x",
+                Foreground = Brush.Parse(isWarning ? "#1A191D" : "#FFFFFF"),
+                FontSize = 11,
+                FontWeight = FontWeight.Bold,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, -1, 0, 0),
+            },
         };
         ToolTip.SetTip(icon, isWarning ? "Warning" : "Error");
         row.Children.Add(CreateBreakpointCell(icon, 0));

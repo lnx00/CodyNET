@@ -50,6 +50,23 @@ ide [OPTIONS]
 
 Accepts the same options as `boot` (except `--debug`, which is implied).
 
+**Edit-and-run workflow:** load your `.asm` once via **Load** in the Assembly Editor. The editor
+reloads it automatically whenever you save it in an external editor (e.g. Sublime Text), keeping
+breakpoints, caret and scroll position. Press **F5** (or the **▶ Run** button) to assemble and start
+the program. The arrow next to the Run button selects how it is started:
+
+| Run mode | What happens | Time to start (1 MHz) |
+|---|---|---|
+| **BASIC** (default) | Reset the CPU, type `LOAD 1,1` into CodyBASIC, send the binary over UART1, the same steps as doing it by hand | ~1.8 s |
+| **Cartridge** | Load the binary (start/end header) straight into memory and start it, skipping BASIC, like `run --as-cartridge` | immediate |
+
+Both modes expect the binary to begin with the 4-byte start/end address header. In cartridge mode
+BASIC never runs, so nothing it normally sets up (screen, interrupt handler, keyboard scanning) is
+initialized, and RAM keeps whatever the previous run left there. Unlike `run --as-cartridge`, the
+reset vector is left untouched, so **CPU Reset** and BASIC mode still boot into CodyBASIC.
+
+If assembling fails, nothing is reset and the problems are listed in the **Errors** tab.
+
 **Examples:**
 
 ```

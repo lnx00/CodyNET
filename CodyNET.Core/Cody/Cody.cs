@@ -62,6 +62,15 @@ public class Cody
 
     private int _allowedSteps = -1; // -1 = Normal running, 0 = Paused, 1 = Single Step Mode
     private readonly ManualResetEventSlim _resumeEvent = new(initialState: true); // true = open (running)
+    private InputSequence? _inputSequence; // Scripted input, processed on the emulator thread
+
+    // Measured: CodyBASIC enables its jiffy timer (and is ready for keyboard input) 434,401 cycles
+    // after reset, on both cold and warm resets. Wait a bit longer to be safe.
+    private const long BasicBootCycles = 700_000;
+    // BASIC scans the keyboard once per jiffy (~18,250 cycles) and only accepts a key that is seen
+    // on two consecutive scans and differs from the previous key. Hold and release for >3 jiffies each.
+    private const long KeyHoldCycles = 60_000;
+    private const long KeyReleaseCycles = 60_000;
 
     public long FrequencyHz
     {
@@ -149,6 +158,84 @@ public class Cody
         Cpu.Reset();
     }
 
+    /// <summary>
+    /// Reproduces the manual "reset, type LOAD 1,1, send binary over UART" workflow:
+    /// resets the CPU into CodyBASIC, types <paramref name="command"/> followed by RETURN on the
+    /// emulated keyboard once BASIC is ready, then queues <paramref name="binaryFile"/> on UART1.
+    /// BASIC loads the binary and jumps to its start address. Thread-safe: everything runs on the
+    /// emulator thread, timed in CPU cycles. Calling it again cancels a sequence still in progress.
+    /// </summary>
+    public void RunViaBasicLoad(FileInfo binaryFile, string command = "LOAD 1,1")
+    {
+        var keyboard = Keyboard ?? throw new InvalidOperationException("No keyboard device available.");
+        var unmapped = command.Where(c => !keyboard.CanType(c)).Distinct().ToArray();
+        if (unmapped.Length > 0)
+            throw new ArgumentException($"Cannot type character(s) '{new string(unmapped)}' on the Cody keyboard.", nameof(command));
+
+        var sequence = new InputSequence().Then(0, () =>
+        {
+            keyboard.ReleaseAllKeys();
+            Cpu.Reset();
+            Log.Info("Scripted run: CPU reset, typing '{Command}' once BASIC is ready", command);
+        });
+
+        var delay = BasicBootCycles;
+        foreach (var character in command + "\n")
+        {
+            sequence.Then(delay, () => keyboard.TypeCharacter(character, true));
+            sequence.Then(KeyHoldCycles, () => keyboard.TypeCharacter(character, false));
+            delay = KeyReleaseCycles;
+        }
+
+        sequence.Then(0, () =>
+        {
+            LoadUartSource(binaryFile, 1);
+            Log.Info("Scripted run: sent {File} over UART1", binaryFile.FullName);
+        });
+
+        Volatile.Write(ref _inputSequence, sequence);
+        Resume(); // The sequence only advances while the CPU runs
+    }
+
+    /// <summary>
+    /// Runs <paramref name="cartridgeFile"/> like <c>run --as-cartridge</c>: the image (with its
+    /// start/end header) is written straight into memory and the CPU is reset into it, skipping
+    /// CodyBASIC entirely. Unlike the CLI, the reset vector is not modified, so a later CPU reset
+    /// (or <see cref="RunViaBasicLoad"/>) still boots into BASIC. Thread-safe like RunViaBasicLoad.
+    /// </summary>
+    /// <exception cref="InvalidDataException">The file has no valid cartridge header.</exception>
+    public void RunAsCartridge(FileInfo cartridgeFile)
+    {
+        CheckFilePath(cartridgeFile);
+        // Parse on the caller's thread so a bad header is reported to the caller
+        var (image, start) = ParseImage(File.ReadAllBytes(cartridgeFile.FullName), new CodyLoadOptions { AsCartridge = true });
+        var end = start + image.Length - 1;
+
+        // A cartridge that supplies its own reset vector starts there, like ApplyVectors does
+        ushort entry = start;
+        if (start <= Cpu.RESET_VECTOR && end >= Cpu.RESET_VECTOR + 1)
+        {
+            var offset = Cpu.RESET_VECTOR - start;
+            entry = (ushort)(image[offset] | (image[offset + 1] << 8));
+        }
+
+        if (end >= 0xE000)
+            Log.Warn("Cartridge {File} overlaps the CodyBASIC ROM area ($E000-$FFFF); BASIC may not boot until the emulator is restarted", cartridgeFile.Name);
+
+        var keyboard = Keyboard;
+        var sequence = new InputSequence().Then(0, () =>
+        {
+            keyboard?.ReleaseAllKeys();
+            LoadImage(image, start);
+            Cpu.ResetToAddress(entry);
+            Log.Info("Cartridge run: loaded {File} at ${Start:X4}-${End:X4}, starting at ${Entry:X4}",
+                cartridgeFile.Name, start, end, entry);
+        });
+
+        Volatile.Write(ref _inputSequence, sequence);
+        Resume();
+    }
+
     public StepResult Step()
     {
         return Cpu.Step();
@@ -190,6 +277,11 @@ public class Cody
                 //break;
             }
             _resumeEvent.Wait(); // Block here when paused - zero latency on resume
+
+            var sequence = Volatile.Read(ref _inputSequence);
+            if (sequence != null && sequence.Update(Cpu))
+                Interlocked.CompareExchange(ref _inputSequence, null, sequence); // Keep a newer sequence
+
             result = Cpu.Step();
             if (_allowedSteps > 0) // After step, reduce allowed steps, if limited
             {

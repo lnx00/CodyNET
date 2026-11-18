@@ -59,6 +59,14 @@ public class KeyState
 
     public KeyState()
     {
+        ReleaseAll();
+    }
+
+    /// <summary>
+    /// Mark every key as released
+    /// </summary>
+    public void ReleaseAll()
+    {
         for (int i = 0; i < State.Length; i++)
         {
             State[i] = 0xF8; // Unpressed keys read as 1.

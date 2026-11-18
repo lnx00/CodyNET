@@ -23,6 +23,8 @@ public static class FrontendHostBridge
     // Frontend Bindings
     private static Action<long>? setClockFrequencyAction; // Buttons to set frequency
     private static Action<FileInfo>? loadUart1SourceAction; // Button for loading UART1 source data from file
+    private static Action<FileInfo>? runViaBasicLoadAction; // Run [F5]: reset, type LOAD 1,1, send binary over UART1
+    private static Action<FileInfo>? runAsCartridgeAction; // Run [F5] in cartridge mode: load image, start at it
     private static Func<CpuRegisterSnapshot>? getRegisterSnapshotFunc; // Display for Register and CPU Flags
     private static Func<CodyStatusSnapshot>? getStatusSnapshotFunc; // Display for Frequency and FPS
     private static Action<int>? setRunStateAction; // Buttons for Pause, Resume and Single Step
@@ -36,6 +38,8 @@ public static class FrontendHostBridge
 
         setClockFrequencyAction = null;
         loadUart1SourceAction = null;
+        runViaBasicLoadAction = null;
+        runAsCartridgeAction = null;
         getRegisterSnapshotFunc = null;
         getStatusSnapshotFunc = null;
         setRunStateAction = null;
@@ -80,6 +84,34 @@ public static class FrontendHostBridge
         loadUart1SourceAction?.Invoke(fileInfo);
     }
     
+    public static void RegisterRunViaBasicLoad(Action<FileInfo> runner)
+    {
+        runViaBasicLoadAction = runner;
+    }
+
+    /// <summary>Resets into CodyBASIC, types LOAD 1,1 and sends <paramref name="binaryFile"/> over UART1.</summary>
+    public static bool RunViaBasicLoad(FileInfo binaryFile)
+    {
+        if (runViaBasicLoadAction == null)
+            return false;
+        runViaBasicLoadAction(binaryFile);
+        return true;
+    }
+
+    public static void RegisterRunAsCartridge(Action<FileInfo> runner)
+    {
+        runAsCartridgeAction = runner;
+    }
+
+    /// <summary>Loads <paramref name="cartridgeFile"/> (with start/end header) into memory and starts it, skipping BASIC.</summary>
+    public static bool RunAsCartridge(FileInfo cartridgeFile)
+    {
+        if (runAsCartridgeAction == null)
+            return false;
+        runAsCartridgeAction(cartridgeFile);
+        return true;
+    }
+
     public static void RegisterClockFrequencySetter(Action<long> setter, long initialFrequencyHz)
     {
         setClockFrequencyAction = setter;

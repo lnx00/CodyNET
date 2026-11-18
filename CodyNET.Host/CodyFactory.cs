@@ -65,6 +65,8 @@ public static class CodyFactory
         FrontendHostBridge.RegisterStatusSnapshotProvider(cody.GetStatusSnapshot);
         FrontendHostBridge.RegisterRunStateAction(cody.SetAllowedSteps);
         FrontendHostBridge.RegisterResetAction(cody.Reset);
+        FrontendHostBridge.RegisterRunViaBasicLoad(binaryFile => cody.RunViaBasicLoad(binaryFile));
+        FrontendHostBridge.RegisterRunAsCartridge(cody.RunAsCartridge);
         FrontendHostBridge.RegisterMemoryReader(cody.Memory.Read);
     }
 
