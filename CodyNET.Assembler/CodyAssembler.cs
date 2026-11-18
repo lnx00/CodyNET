@@ -39,19 +39,35 @@ public static class CodyAssembler
     public static (FileInfo Output, Dictionary<ushort, int> AddressToPreLine) AssembleFileWithMap(
         FileInfo inputFile, FileInfo originalAssemblyFile, FileInfo? outputFile = null)
     {
-        if (!inputFile.Exists)
-            throw new FileNotFoundException("Input file does not exist", inputFile.FullName);
+        return AssembleFileWithMapAsync(inputFile, originalAssemblyFile, outputFile).GetAwaiter().GetResult();
+    }
 
-        outputFile ??= FileUtils.GetWithChangedExtension(inputFile, ".bin");
+    /// <summary>
+    /// Async variant of <see cref="AssembleFileWithMap"/>. Preprocessing, the 64tass run and
+    /// listing parsing all happen off the calling thread, so it is safe to await from a UI thread.
+    /// </summary>
+    public static Task<(FileInfo Output, Dictionary<ushort, int> AddressToPreLine)> AssembleFileWithMapAsync(
+        FileInfo inputFile, FileInfo originalAssemblyFile, FileInfo? outputFile = null,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.Run(async () =>
+        {
+            inputFile.Refresh();
+            if (!inputFile.Exists)
+                throw new FileNotFoundException("Input file does not exist", inputFile.FullName);
 
-        var preFile  = FileUtils.GetWithChangedExtension(inputFile, "_pre.asm");
-        var listFile = FileUtils.GetWithChangedExtension(preFile,   ".lst");
+            outputFile ??= FileUtils.GetWithChangedExtension(inputFile, ".bin");
 
-        CodyPreprocessor.PreprocessFile(inputFile, preFile);
-        TassAssembler.AssembleFile(preFile, originalAssemblyFile, outputFile, listFile);
+            var preFile  = FileUtils.GetWithChangedExtension(inputFile, "_pre.asm");
+            var listFile = FileUtils.GetWithChangedExtension(preFile,   ".lst");
 
-        var addressToPreLine = ParseListingFile(listFile, preFile);
-        return (outputFile, addressToPreLine);
+            CodyPreprocessor.PreprocessFile(inputFile, preFile);
+            await TassAssembler.AssembleFileAsync(preFile, originalAssemblyFile, outputFile, listFile, cancellationToken)
+                .ConfigureAwait(false);
+
+            var addressToPreLine = ParseListingFile(listFile, preFile);
+            return (outputFile, addressToPreLine);
+        }, cancellationToken);
     }
 
     // ── Listing file parser ───────────────────────────────────────────────────

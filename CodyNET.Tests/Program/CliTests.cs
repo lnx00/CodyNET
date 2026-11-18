@@ -15,6 +15,14 @@ public class CliTests
         Assert.That(result.Errors, Is.Empty);
     }
 
+    [Test]
+    public void TestIdeCommandParses()
+    {
+        var result = Cli.BuildRootCommand().Parse("ide --clock 2MHz --start-paused");
+        Assert.That(result.Errors, Is.Empty);
+        Assert.That(result.CommandResult.Command.Name, Is.EqualTo("ide"));
+    }
+
     public void TestBootDefaults()
     {
         string input = "boot";

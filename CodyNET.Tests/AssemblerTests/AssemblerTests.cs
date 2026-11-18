@@ -26,7 +26,67 @@ public class AssemblerTests
     [Test]
     public void TestInvalidOpcode()
     {
-        Assert.Throws<InvalidOperationException>(() => CodyAssembler.AssembleFileToBytes(FileUtils.GetTestDataFile("invalidOpcode.asm")));
+        var ex = Assert.Throws<AssemblerException>(() => CodyAssembler.AssembleFileToBytes(FileUtils.GetTestDataFile("invalidOpcode.asm")));
+        Assert.That(ex!.Diagnostics, Has.Count.GreaterThan(0));
+        Assert.That(ex.Diagnostics[0].Line, Is.EqualTo(1));
+        Assert.That(ex.Diagnostics[0].Severity, Is.EqualTo(AssemblerDiagnosticSeverity.Error));
+        Assert.That(ex.Diagnostics[0].File, Does.EndWith("invalidOpcode._pre.asm"));
+    }
+
+    [Test]
+    public void TestParseTassOutput()
+    {
+        const string output =
+            "X:\\repos\\proj\\editor._pre.asm:12:5: error: general syntax\r\n" +
+            " lda ##1\r\n" +
+            "     ^\r\n" +
+            "/home/user/inc/macros.asm:3:1: warning: unused symbol 'foo'\n" +
+            "/home/user/inc/macros.asm:1:1: note: original definition\n" +
+            "editor._pre.asm:7:2: fatal error: can't open file\n" +
+            "error: some unlocated message\n";
+
+        var diags = AssemblerDiagnostic.ParseTassOutput(output);
+
+        Assert.That(diags, Is.EqualTo(new[]
+        {
+            new AssemblerDiagnostic("X:\\repos\\proj\\editor._pre.asm", 12, 5, AssemblerDiagnosticSeverity.Error, "general syntax"),
+            new AssemblerDiagnostic("/home/user/inc/macros.asm", 3, 1, AssemblerDiagnosticSeverity.Warning, "unused symbol 'foo'"),
+            new AssemblerDiagnostic("/home/user/inc/macros.asm", 1, 1, AssemblerDiagnosticSeverity.Note, "original definition"),
+            new AssemblerDiagnostic("editor._pre.asm", 7, 2, AssemblerDiagnosticSeverity.Error, "can't open file"),
+        }));
+    }
+
+    [Test]
+    public void TestParseTassOutputEmpty()
+    {
+        Assert.That(AssemblerDiagnostic.ParseTassOutput(null), Is.Empty);
+        Assert.That(AssemblerDiagnostic.ParseTassOutput(""), Is.Empty);
+    }
+
+    [Test]
+    public async Task TestAssembleWithMapAsync()
+    {
+        var input = FileUtils.GetTestDataFile("programs/assembly/TicTacToe.asm");
+        var output = new FileInfo(Path.Combine(Path.GetTempPath(), $"cody_{Guid.NewGuid():N}.bin"));
+        try
+        {
+            var (result, addressToPreLine) = await CodyAssembler.AssembleFileWithMapAsync(input, input, output);
+            Assert.That(result.Length, Is.GreaterThan(0));
+            // TicTacToe sets an origin, so the listing yields address -> line entries.
+            Assert.That(addressToPreLine, Is.Not.Empty);
+        }
+        finally
+        {
+            output.Delete();
+        }
+    }
+
+    [Test]
+    public async Task TestInvalidOpcodeAsync()
+    {
+        var input = FileUtils.GetTestDataFile("invalidOpcode.asm");
+        var ex = await Assert.ThrowsAsync<AssemblerException>(() => CodyAssembler.AssembleFileWithMapAsync(input, input));
+        Assert.That(ex!.Diagnostics.Select(d => d.Line), Does.Contain(1));
     }
 
     [Test]

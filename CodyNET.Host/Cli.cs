@@ -55,6 +55,7 @@ public static class Cli
 
         root.Subcommands.Add(BuildListCommand());
         root.Subcommands.Add(BuildBootCommand(verboseOption, logLevelOption, useMainThreadScreenHost));
+        root.Subcommands.Add(BuildIdeCommand(verboseOption, logLevelOption, useMainThreadScreenHost));
         root.Subcommands.Add(BuildRunCommand(verboseOption, logLevelOption, useMainThreadScreenHost));
         root.Subcommands.Add(BuildAssembleCommand(verboseOption, logLevelOption));
         root.Subcommands.Add(BuildDisassembleCommand(verboseOption, logLevelOption));
@@ -326,6 +327,31 @@ public static class Cli
         return cmd;
     }
 
+    /// <summary>
+    /// Shortcut for <c>boot --debug</c>: boots CodyBASIC with the debugger / IDE enabled.
+    /// </summary>
+    private static Command BuildIdeCommand(Option<bool> verboseOption, Option<LogLevel?> logLevelOption, bool useMainThreadScreenHost)
+    {
+        var cmd = new Command("ide", "Boot the emulator with the debugger and code editor enabled (same as 'boot --debug')");
+        var executionOptions = AddExecutionOptions(cmd, includeDebug: false);
+
+        cmd.SetAction(parseResult =>
+        {
+            ApplyLogging(parseResult, verboseOption, logLevelOption);
+            var setupOptions = BuildSetupOptions(parseResult, executionOptions) with { EnableDebugger = true };
+            var loadOptions = BuildSharedLoadOptions(parseResult, executionOptions);
+
+            if (useMainThreadScreenHost && setupOptions.EnableScreen)
+                ExecuteBootCommandWithScreenHost(setupOptions, loadOptions);
+            else
+                ExecuteBootCommand(setupOptions, loadOptions);
+
+            return 0;
+        });
+
+        return cmd;
+    }
+
     private static void ExecuteBootCommand(CodySetupOptions setupOptions, CodyLoadOptions loadOptions)
     {
         Log.Info("Executing boot command");
@@ -497,24 +523,33 @@ public static class Cli
             var inputFile = parseResult.GetValue(fileArg)
                 ?? throw new ArgumentException("Missing input file argument.");
 
-            ExecuteAssembleCommand(
+            return ExecuteAssembleCommand(
                 inputFile, 
                 parseResult.GetValue(output));
-            return 0;
         });
 
         return cmd;
     }
 
-    private static void ExecuteAssembleCommand(
+    private static int ExecuteAssembleCommand(
         FileInfo inputFile, 
         FileInfo? outputFile)
     {
-        outputFile = CodyAssembler.AssembleFile(inputFile, outputFile);
-        if (outputFile.Length == 0)
-            throw new InvalidOperationException("Assembler produced no output bytes.");
-        
+        try
+        {
+            outputFile = CodyAssembler.AssembleFile(inputFile, outputFile);
+            outputFile.Refresh();
+            if (outputFile.Length == 0)
+                throw new InvalidOperationException("Assembler produced no output bytes.");
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Assembling {InputFile} failed: {Message}", inputFile.FullName, ex.Message);
+            return 1;
+        }
+
         Log.Info("Assembled {InputFile} -> {OutputFile}", inputFile.FullName, outputFile.FullName);
+        return 0;
     }
 
     private static Command BuildDisassembleCommand(Option<bool> verboseOption, Option<LogLevel?> logLevelOption)

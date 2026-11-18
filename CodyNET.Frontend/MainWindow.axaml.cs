@@ -55,6 +55,7 @@ public partial class MainWindow : Window
     private int _lastClockComboIndex = 2;
     private BreakpointMargin? _breakpointMargin;
     private CurrentLineRenderer? _currentLineRenderer;
+    private ErrorLineRenderer? _errorLineRenderer;
     private readonly Dictionary<int, bool> _codeEditorBreakpointLines = new();
     private Dictionary<ushort, int> _addressToSourceLine = new();
     private List<string> _codeLines = [];
@@ -87,6 +88,11 @@ public partial class MainWindow : Window
         var xshd = HighlightingLoader.LoadXshd(xmlReader);
         CodeEditorTextBox.SyntaxHighlighting = HighlightingLoader.Load(xshd, HighlightingManager.Instance);
 
+        _errorLineRenderer = new ErrorLineRenderer();
+        CodeEditorTextBox.TextArea.TextView.BackgroundRenderers.Add(_errorLineRenderer);
+        CodeEditorTextBox.PointerHover += OnCodeEditorPointerHover;
+        CodeEditorTextBox.PointerHoverStopped += (_, _) => HideErrorToolTip();
+
         _currentLineRenderer = new CurrentLineRenderer();
         CodeEditorTextBox.TextArea.TextView.BackgroundRenderers.Add(_currentLineRenderer);
     }
@@ -116,6 +122,7 @@ public partial class MainWindow : Window
         RefreshRegisterValues();
         SetMemoryViewStart(0);
         RefreshBreakpointsPanel();
+        SetErrorList([], NoErrorsText);
         SyncInitialClockFrequency();
         registerRefreshTimer?.Start();
         footerRefreshTimer?.Start();
@@ -1025,6 +1032,8 @@ public partial class MainWindow : Window
         _suppressCodeEditorEvents = true;
         CodeEditorTextBox.Text = sourceText;
         _suppressCodeEditorEvents = false;
+        ClearErrorHighlights();
+        SetErrorList([], NoErrorsText);
 
         SetCodePanelState(fileInfo.Name, sourceText);
         CompileAssemblyButton.IsEnabled = true;
@@ -1064,7 +1073,7 @@ public partial class MainWindow : Window
         return count;
     }
 
-    private void OnCompileAssemblyClick(object? sender, RoutedEventArgs e)
+    private async void OnCompileAssemblyClick(object? sender, RoutedEventArgs e)
     {
         // Always read directly from the editor so edits are never missed.
         var editorLines = (CodeEditorTextBox.Text ?? string.Empty)
@@ -1100,19 +1109,246 @@ public partial class MainWindow : Window
         }
 
         var inputFile = new FileInfo("editor.asm");
-        File.WriteAllText(inputFile.FullName, string.Join("\n", finalCode));
+        var sourceText = string.Join("\n", finalCode);
 
-        var (_, addressToPreLine) = CodyAssembler.AssembleFileWithMap(inputFile, originalAssemblyFile);
-
-        // Combine: address -> pre.asm line -> original editor line
-        _addressToSourceLine = new Dictionary<ushort, int>();
-        foreach (var (address, preLine) in addressToPreLine)
+        // Assemble off the UI thread; any failure (bad syntax, missing 64tass, timeout, I/O)
+        // is reported to the user instead of escaping the event handler and killing the app.
+        CompileAssemblyButton.IsEnabled = false;
+        SendAssemblyOverUartButton.IsEnabled = false;
+        ClearErrorHighlights();
+        SetErrorList([], "Assembling...");
+        try
         {
-            if (preAsmLineToSourceLine.TryGetValue(preLine, out var sourceLine))
-                _addressToSourceLine[address] = sourceLine;
+            await File.WriteAllTextAsync(inputFile.FullName, sourceText);
+            var (_, addressToPreLine) = await CodyAssembler.AssembleFileWithMapAsync(inputFile, originalAssemblyFile);
+
+            // Combine: address -> pre.asm line -> original editor line
+            _addressToSourceLine = new Dictionary<ushort, int>();
+            foreach (var (address, preLine) in addressToPreLine)
+            {
+                if (preAsmLineToSourceLine.TryGetValue(preLine, out var sourceLine))
+                    _addressToSourceLine[address] = sourceLine;
+            }
+
+            SetErrorList([], "Assembled successfully. No errors.");
+            SendAssemblyOverUartButton.IsEnabled = true;
+        }
+        catch (AssemblerException ex)
+        {
+            Log.Error(ex, "Assembling {file} failed", inputFile.FullName);
+            ShowAssemblerErrors(ex, inputFile, preAsmLineToSourceLine);
+        }
+        catch (Exception ex)
+        {
+            // Not a source error (missing 64tass, timeout, I/O): list it without a location.
+            Log.Error(ex, "Assembling {file} failed", inputFile.FullName);
+            SetErrorList([new ErrorListEntry(AssemblerDiagnosticSeverity.Error, null, 0, ex.Message, null)], NoErrorsText);
+            LowerPanelTabs.SelectedItem = ErrorsTab;
+        }
+        finally
+        {
+            CompileAssemblyButton.IsEnabled = true;
+        }
+    }
+
+    private const string NoErrorsText = "No errors.";
+
+    /// <summary>One row in the Errors tab. <see cref="Line"/> is an editor line, or null if the
+    /// message has no location in the editor (included file, tool failure).</summary>
+    private sealed record ErrorListEntry(
+        AssemblerDiagnosticSeverity Severity, int? Line, int Column, string Message, string? File);
+
+    /// <summary>
+    /// Maps 64tass diagnostics from editor._pre.asm back to editor lines, highlights them,
+    /// fills the Errors tab and moves the caret to the first one.
+    /// Diagnostics in included files cannot be shown in the editor and are listed by file name.
+    /// </summary>
+    private void ShowAssemblerErrors(AssemblerException ex, FileInfo inputFile, Dictionary<int, int> preAsmLineToSourceLine)
+    {
+        var preFilePath = Path.GetFullPath(FileUtils.GetWithChangedExtension(inputFile, "_pre.asm").FullName);
+        var entries = new List<ErrorListEntry>();
+
+        foreach (var diag in ex.Diagnostics)
+        {
+            if (diag.Severity == AssemblerDiagnosticSeverity.Note)
+                continue;
+
+            var inEditor = string.Equals(SafeFullPath(diag.File), preFilePath, StringComparison.OrdinalIgnoreCase);
+
+            if (inEditor && preAsmLineToSourceLine.TryGetValue(diag.Line, out var editorLine))
+            {
+                var severity = diag.Severity == AssemblerDiagnosticSeverity.Warning ? "warning" : "error";
+                _errorLineRenderer?.Add(editorLine, $"{severity}: {diag.Message}");
+                entries.Add(new ErrorListEntry(diag.Severity, editorLine, diag.Column, diag.Message, GetLoadedAssemblyFileName()));
+            }
+            else
+            {
+                entries.Add(new ErrorListEntry(diag.Severity, null, 0, diag.Message, $"{Path.GetFileName(diag.File)}:{diag.Line}"));
+            }
         }
 
-        SendAssemblyOverUartButton.IsEnabled = true;
+        // Nothing could be parsed: show the raw 64tass output as a single entry.
+        if (entries.Count == 0)
+            entries.Add(new ErrorListEntry(AssemblerDiagnosticSeverity.Error, null, 0, ex.Message, null));
+
+        CodeEditorTextBox.TextArea.TextView.InvalidateVisual();
+        SetErrorList(entries, NoErrorsText);
+        LowerPanelTabs.SelectedItem = ErrorsTab;
+
+        if (entries.FirstOrDefault(entry => entry.Line is not null) is { Line: { } line } first)
+            JumpToEditorPosition(line, first.Column, focus: false);
+    }
+
+    /// <summary>Removes the red line highlights and tooltips from the editor (the Errors tab is kept).</summary>
+    private void ClearErrorHighlights()
+    {
+        if (_errorLineRenderer is null || _errorLineRenderer.Messages.Count == 0)
+            return;
+
+        _errorLineRenderer.Messages.Clear();
+        HideErrorToolTip();
+        CodeEditorTextBox.TextArea.TextView.InvalidateVisual();
+    }
+
+    /// <summary>Rebuilds the Errors tab. <paramref name="emptyText"/> is shown when there are no entries.</summary>
+    private void SetErrorList(IReadOnlyList<ErrorListEntry> entries, string emptyText)
+    {
+        ErrorsPanel.Children.Clear();
+
+        var errorCount = entries.Count(entry => entry.Severity == AssemblerDiagnosticSeverity.Error);
+        ErrorBadge.IsVisible = entries.Count > 0;
+        ErrorBadge.Background = Brush.Parse(errorCount > 0 ? "#C62828" : "#8A6D00");
+        ErrorBadgeText.Text = entries.Count.ToString();
+
+        if (entries.Count == 0)
+        {
+            var placeholder = new TextBlock
+            {
+                Text = emptyText,
+                Foreground = Brush.Parse("#8191B0"),
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            placeholder.Classes.Add("code-text");
+            ErrorsPanel.Children.Add(new Border { Child = placeholder, Classes = { "breakpoint-row" } });
+            return;
+        }
+
+        var header = CreateErrorRowGrid();
+        header.Children.Add(CreateBreakpointCell(new TextBlock { Text = "Line" }, 1, "breakpoint-column-header"));
+        header.Children.Add(CreateBreakpointCell(new TextBlock { Text = "Description" }, 2, "breakpoint-column-header"));
+        header.Children.Add(CreateBreakpointCell(new TextBlock { Text = "File" }, 3, "breakpoint-column-header"));
+        ErrorsPanel.Children.Add(new Border { Child = header, Classes = { "breakpoint-header-row" } });
+
+        foreach (var entry in entries)
+            ErrorsPanel.Children.Add(CreateErrorRow(entry));
+    }
+
+    private Border CreateErrorRow(ErrorListEntry entry)
+    {
+        var isWarning = entry.Severity == AssemblerDiagnosticSeverity.Warning;
+        var row = CreateErrorRowGrid();
+
+        var icon = new TextBlock
+        {
+            Text = isWarning ? "⚠" : "✖",
+            Foreground = Brush.Parse(isWarning ? "#FFCC3E" : "#FF5A5A"),
+            FontSize = 14,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
+        };
+        ToolTip.SetTip(icon, isWarning ? "Warning" : "Error");
+        row.Children.Add(CreateBreakpointCell(icon, 0));
+
+        row.Children.Add(CreateBreakpointCell(new TextBlock
+        {
+            Text = entry.Line?.ToString() ?? "",
+            Foreground = Brush.Parse("#F2F2F3"),
+            VerticalAlignment = VerticalAlignment.Center,
+        }, 1, "code-text"));
+
+        var message = new TextBlock
+        {
+            Text = entry.Message,
+            Foreground = Brush.Parse("#F2F2F3"),
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+        };
+        row.Children.Add(CreateBreakpointCell(message, 2, "code-text"));
+
+        var file = new TextBlock
+        {
+            Text = entry.File ?? "",
+            Foreground = Brush.Parse("#8191B0"),
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+        };
+        ToolTip.SetTip(file, entry.File);
+        row.Children.Add(CreateBreakpointCell(file, 3, "code-text"));
+
+        var border = new Border { Child = row, Classes = { "breakpoint-row", "error-row" } };
+        if (entry.Line is { } line)
+        {
+            border.Tapped += (_, _) => JumpToEditorPosition(line, entry.Column, focus: true);
+        }
+        else
+        {
+            border.Cursor = Cursor.Default;
+        }
+
+        return border;
+    }
+
+    private static Grid CreateErrorRowGrid() => new()
+    {
+        ColumnDefinitions = new ColumnDefinitions("24,50,*,120"),
+        ColumnSpacing = 8,
+    };
+
+    private void JumpToEditorPosition(int line, int column, bool focus)
+    {
+        if (line < 1 || line > CodeEditorTextBox.Document.LineCount)
+            return;
+
+        CodeEditorTextBox.ScrollToLine(line);
+        CodeEditorTextBox.TextArea.Caret.Line = line;
+        CodeEditorTextBox.TextArea.Caret.Column = Math.Max(1, column);
+        CodeEditorTextBox.TextArea.Caret.BringCaretToView();
+        if (focus)
+            CodeEditorTextBox.Focus();
+    }
+
+    /// <summary>
+    /// Shows the assembler message(s) for the hovered line, if that line has errors.
+    /// </summary>
+    private void OnCodeEditorPointerHover(object? sender, PointerEventArgs e)
+    {
+        if (_errorLineRenderer is null || _errorLineRenderer.Messages.Count == 0)
+            return;
+
+        var position = CodeEditorTextBox.GetPositionFromPoint(e.GetPosition(CodeEditorTextBox));
+        if (position is not { } pos || !_errorLineRenderer.Messages.TryGetValue(pos.Line, out var messages))
+        {
+            HideErrorToolTip();
+            return;
+        }
+
+        ToolTip.SetTip(CodeEditorTextBox, string.Join("\n", messages));
+        ToolTip.SetIsOpen(CodeEditorTextBox, true);
+        e.Handled = true;
+    }
+
+    private void HideErrorToolTip()
+    {
+        ToolTip.SetIsOpen(CodeEditorTextBox, false);
+        // Clear the tip too, otherwise Avalonia's tooltip service would keep showing
+        // the last message anywhere over the editor.
+        ToolTip.SetTip(CodeEditorTextBox, null);
+    }
+
+    private static string SafeFullPath(string path)
+    {
+        try { return Path.GetFullPath(path); }
+        catch { return path; }
     }
 
     private void OnSendAssemblyOverUartClick(object? sender, RoutedEventArgs e)
@@ -1130,6 +1366,7 @@ public partial class MainWindow : Window
 
         _isAssemblyDirty = true;
         _addressToSourceLine.Clear(); // Clear mapping
+        ClearErrorHighlights();       // Line numbers may have shifted; stale markers would mislead
         var sourceText = CodeEditorTextBox.Text ?? string.Empty;
         _codeLines = sourceText.Split('\n').Select(l => l.TrimEnd('\r')).ToList();
         SetCodePanelState(GetLoadedAssemblyFileName(), sourceText);

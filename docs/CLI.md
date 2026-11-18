@@ -40,6 +40,23 @@ boot --debug --clock 2MHz
 boot --uart1-source program.bas
 ```
 
+### ide
+
+Boot the emulator with the debugger and code editor enabled. Shortcut for `boot --debug`.
+
+```
+ide [OPTIONS]
+```
+
+Accepts the same options as `boot` (except `--debug`, which is implied).
+
+**Examples:**
+
+```
+ide
+ide --clock 2MHz --start-paused
+```
+
 ### run
 
 Run a binary file with the emulator.

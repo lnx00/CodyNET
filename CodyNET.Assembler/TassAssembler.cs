@@ -19,24 +19,86 @@ internal static class TassAssembler
         /// depending on the 64tass version/syntax you use.
         /// If you do not need explicit selection, pass empty string.
 
+        private static readonly TimeSpan AssembleTimeout = TimeSpan.FromSeconds(5);
+
         internal static void AssembleFile(FileInfo inputFile, FileInfo originalAssemblyFile, FileInfo? outputFile = null, FileInfo? listFile = null)
         {
-            //inputFile = EnsureUtf8WithoutBom(inputFile);
-            
-            // 64tass arguments:
-            // - input file
-            // - output file
-            // - choose binary output (raw bytes)
-            //
-            // NOTE: Flags can differ slightly by version. If this fails, run "64tass --help"
-            // and adjust the flags. The structure stays the same.
-            //
-            // Common patterns seen:
-            //   64tass input.asm -o out.bin --nostart
-            //   64tass input.asm -o out.bin --output out.bin --format raw
-            //
-            // We'll use a conservative approach: "-o" for output + "raw/binary format" switch.
+            AssembleFileAsync(inputFile, originalAssemblyFile, outputFile, listFile).GetAwaiter().GetResult();
+        }
 
+        internal static async Task AssembleFileAsync(FileInfo inputFile, FileInfo originalAssemblyFile, FileInfo? outputFile = null,
+            FileInfo? listFile = null, CancellationToken cancellationToken = default)
+        {
+            outputFile ??= FileUtils.GetWithChangedExtension(inputFile, ".bin");
+            var arguments = BuildArguments(inputFile, originalAssemblyFile, outputFile, listFile);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = _tassPath,
+                Arguments = arguments,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            Log.Info("Executing: {executable} {args}", _tassPath, arguments);
+
+            using var proc = Process.Start(psi);
+            if (proc == null)
+                throw new InvalidOperationException("Failed to start 64tass process.");
+
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stderrTask = proc.StandardError.ReadToEndAsync(cancellationToken);
+
+            using (var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                timeoutCts.CancelAfter(AssembleTimeout);
+                try
+                {
+                    await proc.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    TryKill(proc);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    throw new InvalidOperationException($"64tass timed out after {AssembleTimeout.TotalSeconds:0} seconds.");
+                }
+            }
+
+            string stdout = await stdoutTask.ConfigureAwait(false);
+            string stderr = await stderrTask.ConfigureAwait(false);
+
+            Log.Info("64tass output: {output}", stdout);
+            if (!string.IsNullOrEmpty(stderr))
+            {
+                Log.Error(stderr);
+                throw new AssemblerException(
+                    $"64tass reported errors:{Environment.NewLine}{stderr}",
+                    AssemblerDiagnostic.ParseTassOutput(stderr));
+            }
+
+            if (proc.ExitCode != 0)
+            {
+                throw new AssemblerException(
+                    $"64tass failed with exit code {proc.ExitCode}.{Environment.NewLine}" +
+                    $"Args: {psi.Arguments}{Environment.NewLine}" +
+                    $"STDOUT:{Environment.NewLine}{stdout}{Environment.NewLine}" +
+                    $"STDERR:{Environment.NewLine}{stderr}",
+                    AssemblerDiagnostic.ParseTassOutput(stdout + "\n" + stderr));
+            }
+
+            outputFile.Refresh();
+            if (!outputFile.Exists)
+            {
+                throw new InvalidOperationException(
+                    "64tass reported success but output file was not created. " +
+                    "Check output-format flags and 64tass version.");
+            }
+        }
+
+        private static string BuildArguments(FileInfo inputFile, FileInfo originalAssemblyFile, FileInfo outputFile, FileInfo? listFile)
+        {
             var args = new StringBuilder();
 
             // CPU switch (optional)
@@ -47,10 +109,9 @@ internal static class TassAssembler
             }
 
             // Set include search path to original file folder
-            args.Append("-I "); 
+            args.Append("-I ");
             args.Append('"').Append(Path.GetDirectoryName(originalAssemblyFile.FullName)).Append('"');
             args.Append(' ');
-
 
             // Output file
             args.Append("-o ");
@@ -68,60 +129,22 @@ internal static class TassAssembler
             // Input file
             args.Append('"').Append(Path.GetFullPath(inputFile.FullName)).Append('"');
 
-            var psi = new ProcessStartInfo
-            {
-                FileName = _tassPath,
-                Arguments = args.ToString(),
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-
-            using var proc = Process.Start(psi);
-            if (proc == null)
-                throw new InvalidOperationException("Failed to start 64tass process.");
-
-            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
-            var stderrTask = proc.StandardError.ReadToEndAsync();
-            
-            if (!proc.WaitForExit(5000))
-            {
-                proc.Kill();
-                throw new InvalidOperationException("64tass timed out after 5 seconds.");
-            }
-            Task.WaitAll(stdoutTask, stderrTask);
-
-            string stdout = stdoutTask.Result;
-            string stderr = stderrTask.Result;
-
-
-            Log.Info("Executing: {executable} {args}", _tassPath, args.ToString());
-            Log.Info("64tass output: {output}", stdout);
-            if (!string.IsNullOrEmpty(stderr))
-            {
-                Log.Error(stderr);
-                throw new InvalidOperationException($"64tass reported errors:{Environment.NewLine}{stderr}");
-            }
-
-            if (proc.ExitCode != 0)
-            {
-                throw new InvalidOperationException(
-                    $"64tass failed with exit code {proc.ExitCode}.{Environment.NewLine}" +
-                    $"Args: {psi.Arguments}{Environment.NewLine}" +
-                    $"STDOUT:{Environment.NewLine}{stdout}{Environment.NewLine}" +
-                    $"STDERR:{Environment.NewLine}{stderr}");
-            }
-
-            if (!outputFile.Exists)
-            {
-                throw new InvalidOperationException(
-                    "64tass reported success but output file was not created. " +
-                    "Check output-format flags and 64tass version.");
-            }
-            
+            return args.ToString();
         }
-        
+
+        private static void TryKill(Process proc)
+        {
+            try
+            {
+                if (!proc.HasExited)
+                    proc.Kill(entireProcessTree: true);
+            }
+            catch
+            {
+                // Process may have exited between the check and the kill.
+            }
+        }
+
         private static string EnsureUtf8WithoutBom(string inputPath)
         {
             byte[] bytes = File.ReadAllBytes(inputPath);

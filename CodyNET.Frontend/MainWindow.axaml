@@ -80,6 +80,13 @@
             <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="Foreground" Value="#99B7DE" />
         </Style>
+        <Style Selector="Border.error-row">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <Style Selector="Border.error-row:pointerover">
+            <Setter Property="Background" Value="#2E2B31" />
+        </Style>
         <Style Selector="TextBlock.code-file-name">
             <Setter Property="FontSize" Value="13" />
             <Setter Property="Foreground" Value="#B8C8E6" />
@@ -438,31 +445,61 @@
                 <GridSplitter x:Name="LowerPanelSplitter" Grid.Row="2" Background="#49454E" ResizeDirection="Rows" /> <!-- Screen-Lower Divider -->
 
                 <Border x:Name="LowerPanel" Grid.Row="3" Background="#201F22" Padding="0,0,0,8">
-                    <Grid RowDefinitions="Auto,*">
-                        <Border Grid.Row="0" Classes="panel-header">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <TextBlock Classes="panel-header-text" Text="Breakpoints" />
-                                <Border x:Name="BreakpointBadge"
-                                        IsVisible="False"
-                                        Background="#4A474F"
-                                        CornerRadius="8"
-                                        Padding="6,1">
-                                    <TextBlock x:Name="BreakpointBadgeText"
-                                               FontSize="12"
-                                               FontWeight="SemiBold"
-                                               Foreground="#F5F5F7" />
+                    <TabControl x:Name="LowerPanelTabs" Background="#2E2B31" BorderThickness="0">
+                        <TabItem x:Name="BreakpointsTab">
+                            <TabItem.Header>
+                                <Border Classes="panel-header">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <TextBlock Classes="panel-header-text" Text="Breakpoints" />
+                                        <Border x:Name="BreakpointBadge"
+                                                IsVisible="False"
+                                                Background="#4A474F"
+                                                CornerRadius="8"
+                                                Padding="6,1">
+                                            <TextBlock x:Name="BreakpointBadgeText"
+                                                       FontSize="12"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="#F5F5F7" />
+                                        </Border>
+                                    </StackPanel>
                                 </Border>
-                            </StackPanel>
-                        </Border>
-                        
-                        <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled">
-                            <StackPanel
-                                x:Name="BreakpointsPanel"
-                                Margin="0,0,0,24"
-                                Spacing="0">
-                                </StackPanel>
-                        </ScrollViewer>
-                    </Grid>
+                            </TabItem.Header>
+                            <ScrollViewer HorizontalScrollBarVisibility="Disabled" Background="#201F22">
+                                <StackPanel
+                                    x:Name="BreakpointsPanel"
+                                    Margin="0,0,0,24"
+                                    Spacing="0">
+                                    </StackPanel>
+                            </ScrollViewer>
+                        </TabItem>
+
+                        <TabItem x:Name="ErrorsTab">
+                            <TabItem.Header>
+                                <Border Classes="panel-header">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <TextBlock Classes="panel-header-text" Text="Errors" />
+                                        <Border x:Name="ErrorBadge"
+                                                IsVisible="False"
+                                                Background="#4A474F"
+                                                CornerRadius="8"
+                                                Padding="6,1">
+                                            <TextBlock x:Name="ErrorBadgeText"
+                                                       FontSize="12"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="#F5F5F7" />
+                                        </Border>
+                                    </StackPanel>
+                                </Border>
+                            </TabItem.Header>
+                            <ScrollViewer HorizontalScrollBarVisibility="Disabled" Background="#201F22">
+                                <StackPanel
+                                    x:Name="ErrorsPanel"
+                                    Margin="0,0,0,24"
+                                    Spacing="0">
+                                    </StackPanel>
+                            </ScrollViewer>
+                        </TabItem>
+                    </TabControl>
                 </Border>
 
             </Grid>
