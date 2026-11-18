@@ -138,6 +138,13 @@ public class Profiler
 
     public void SampleCpu(long totalCyclesExecuted, long targetFrequencyHz)
     {
+        if (totalCyclesExecuted < _totalCyclesExecuted)
+        {
+            // CPU reset zeroed the cycle counter. Shift the window start by the same amount, so the
+            // window still counts cycles from before and after the reset instead of going negative
+            // (which showed up as "MAX (-300%)" in the speed display right after a reset).
+            _lastCycleCount -= _totalCyclesExecuted;
+        }
         _totalCyclesExecuted = totalCyclesExecuted;
         _targetFrequencyHz = targetFrequencyHz;
 
