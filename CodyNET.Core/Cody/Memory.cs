@@ -40,6 +40,18 @@ public class Memory
     }
 
     /// <summary>
+    /// Power-on state: zeroes RAM and Propeller RAM (screen, characters, colors, sprite data) and
+    /// resets every <see cref="IResettableDevice"/>. ROM and device mappings are kept.
+    /// </summary>
+    public void PowerOnReset()
+    {
+        Array.Clear(_ram);
+        Array.Clear(_prop);
+        foreach (var device in _devices.OfType<IResettableDevice>())
+            device.PowerOnReset();
+    }
+
+    /// <summary>
     /// For efficient read/write operations, memory maps
     /// </summary>
     private void RebuildDeviceMaps()

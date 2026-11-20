@@ -1,5 +1,7 @@
 using CodyNET.Assembler;
 using CodyNET.Core.Cody;
+using CodyNET.Core.Devices;
+using CodyNET.Core.Devices.Audio;
 using CodyNET.Core.Roms;
 using NUnit.Framework;
 
@@ -138,6 +140,48 @@ public class ScriptedRunTests
         cody.RunViaBasicLoad(viaBasic);
         RunUntilStp(cody, "BASIC run after a cartridge run never reached STP - BASIC did not boot.");
         Assert.That(cody.Memory.Read(MarkerAddress), Is.EqualTo(0x22));
+    }
+
+    [TestCase(false, TestName = "RunViaBasicLoad_StartsWithoutLeftoversFromPreviousProgram")]
+    [TestCase(true, TestName = "RunAsCartridge_StartsWithoutLeftoversFromPreviousProgram")]
+    public void Run_StartsWithoutLeftoversFromPreviousProgram(bool asCartridge)
+    {
+        var binary = AssembleMarkerProgram("marker", 0x42);
+        var video = new VideoDevice();
+        var sound = new SoundInterfaceDevice();
+        var cody = new Cody(new CodySetupOptions { EnableScreen = false, EnableDebugger = false, FrequencyHz = -1 }, video, audioDevice: sound);
+        cody.LoadImage(RomLoader.LoadEmbeddedCodyBasic(), 0xE000);
+
+        // What a previous program (e.g. a game with sprites and sound) leaves behind; the ROM's
+        // INIT resets none of it
+        const ushort spriteData = 0xA400, spriteControl = 0xD006, sprite0X = 0xD080,
+            rowEffect = 0xD040, sharedColors = 0xD005, voice1Control = 0xD404, volume = 0xD418;
+        for (ushort a = spriteData; a < spriteData + 0x100; a++)
+            cody.Memory.Write(a, 0xAA);
+        cody.Memory.Write(spriteControl, 0x10);
+        cody.Memory.Write(sprite0X, 80);
+        cody.Memory.Write(rowEffect, 0x81);
+        cody.Memory.Write(sharedColors, 0xE7);
+        cody.Memory.Write(voice1Control, 0x11);
+        cody.Memory.Write(volume, 0x0F);
+
+        if (asCartridge)
+            cody.RunAsCartridge(binary);
+        else
+            cody.RunViaBasicLoad(binary);
+        RunUntilStp(cody, "Program never reached STP.");
+
+        Assert.That(cody.Memory.Read(MarkerAddress), Is.EqualTo(0x42));
+        Assert.Multiple(() =>
+        {
+            Assert.That(Enumerable.Range(spriteData, 0x100).Count(a => cody.Memory.Read((ushort)a) != 0), Is.Zero, "Sprite data not cleared");
+            Assert.That(cody.Memory.Read(spriteControl), Is.Zero, "Sprite control not reset");
+            Assert.That(cody.Memory.Read(sprite0X), Is.Zero, "Sprite bank not reset");
+            Assert.That(cody.Memory.Read(rowEffect), Is.Zero, "Row effects not reset");
+            Assert.That(cody.Memory.Read(sharedColors), Is.Zero, "Shared colors not reset");
+            Assert.That(cody.Memory.Read(voice1Control), Is.Zero, "Sound still gated");
+            Assert.That(cody.Memory.Read(volume), Is.Zero, "Volume not reset");
+        });
     }
 
     [Test]

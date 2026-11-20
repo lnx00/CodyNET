@@ -5,7 +5,7 @@ using CodyNET.Core.Interfaces;
 
 namespace CodyNET.Core.Devices;
 
-public class VideoDevice : IVideoDevice
+public class VideoDevice : IVideoDevice, IResettableDevice
 {
     public readonly struct Color
     {
@@ -147,6 +147,16 @@ public class VideoDevice : IVideoDevice
         Dirty = true;
     }
     
+    /// <summary>
+    /// Clears all video registers, including sprites, sprite control, row effects and shared colors,
+    /// which the ROM's INIT does not touch.
+    /// </summary>
+    public void PowerOnReset()
+    {
+        Array.Clear(_videoMemory);
+        Dirty = true;
+    }
+
     public Interrupt Update(long cycle)
     {
         // CodyBASIC polls D000 to wait for the vertical blanking interval before

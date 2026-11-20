@@ -2,7 +2,7 @@ using CodyNET.Core.Cody;
 using CodyNET.Core.Interfaces;
 namespace CodyNET.Core.Devices.Audio;
 
-public class SoundInterfaceDevice : IAudioDevice
+public class SoundInterfaceDevice : IAudioDevice, IResettableDevice
 {
     // Store sound memory locally in the device, for easy access
     private readonly byte[] _soundMemory = new byte[0x100];
@@ -39,6 +39,13 @@ public class SoundInterfaceDevice : IAudioDevice
                    new Voice(SID_BASE, _soundMemory, VOICE2_OFFSET),
                    new Voice(SID_BASE, _soundMemory, VOICE3_OFFSET)];
     }
+    public void PowerOnReset()
+    {
+        Array.Clear(_soundMemory);
+        foreach (var voice in _voices)
+            voice.PowerOnReset();
+    }
+
     public void SetClockFrequency(long cyclesPerSecond)
     {
         _cpuHz = cyclesPerSecond;

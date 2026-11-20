@@ -159,8 +159,22 @@ public class Cody
     }
 
     /// <summary>
+    /// Like switching the Cody off and on: clears RAM and video/sound registers, then resets the CPU
+    /// into the ROM. A plain <see cref="Reset"/> keeps memory and the registers the ROM's INIT does not
+    /// touch (sprites, row effects, shared colors, sound), so a program would inherit them from the
+    /// previous one. Call on the emulator thread (e.g. from an <see cref="InputSequence"/>).
+    /// </summary>
+    private void ColdStart()
+    {
+        Keyboard?.ReleaseAllKeys();
+        Memory.PowerOnReset();
+        Cpu.Reset();
+    }
+
+    /// <summary>
     /// Reproduces the manual "reset, type LOAD 1,1, send binary over UART" workflow:
-    /// resets the CPU into CodyBASIC, types <paramref name="command"/> followed by RETURN on the
+    /// cold-starts the Cody into CodyBASIC (see <see cref="ColdStart"/>, so nothing is left over from
+    /// the previous program), types <paramref name="command"/> followed by RETURN on the
     /// emulated keyboard once BASIC is ready, then queues <paramref name="binaryFile"/> on UART1.
     /// BASIC loads the binary and jumps to its start address. Thread-safe: everything runs on the
     /// emulator thread, timed in CPU cycles. Calling it again cancels a sequence still in progress.
@@ -174,9 +188,8 @@ public class Cody
 
         var sequence = new InputSequence().Then(0, () =>
         {
-            keyboard.ReleaseAllKeys();
-            Cpu.Reset();
-            Log.Info("Scripted run: CPU reset, typing '{Command}' once BASIC is ready", command);
+            ColdStart();
+            Log.Info("Scripted run: cold start, typing '{Command}' once BASIC is ready", command);
         });
 
         var delay = BasicBootCycles;
@@ -206,8 +219,8 @@ public class Cody
     private const long CartCheckTimeoutCycles = 1_000_000;
 
     /// <summary>
-    /// Runs <paramref name="cartridgeFile"/> the way the Cody boots a cartridge: the CPU is reset
-    /// into the ROM, which runs INIT (copies the character set, resets the video registers, clears
+    /// Runs <paramref name="cartridgeFile"/> the way the Cody boots a cartridge: the Cody is
+    /// cold-started (see <see cref="ColdStart"/>) into the ROM, which runs INIT (copies the character set, resets the video registers, clears
     /// the screen, sets up the VIA timer). When the ROM checks for a cartridge (CARTCHECK), the
     /// image (with its start/end header) is loaded and started instead of BASIC, just like the
     /// ROM's own cartridge path. Takes ~0.2 s of emulated time at 1 MHz.
@@ -248,6 +261,7 @@ public class Cody
             sequence = new InputSequence().Then(0, () =>
             {
                 keyboard?.ReleaseAllKeys();
+                Memory.PowerOnReset(); // Clean slate, as INIT will not run
                 StartDirectly("CodyBASIC's cartridge check was not found in ROM");
             });
         }
@@ -256,8 +270,7 @@ public class Cody
             sequence = new InputSequence()
                 .Then(0, () =>
                 {
-                    keyboard?.ReleaseAllKeys();
-                    Cpu.Reset(); // Boot the ROM: MAIN -> INIT -> CARTCHECK
+                    ColdStart(); // Boot the ROM: MAIN -> INIT -> CARTCHECK
                 })
                 .ThenWhen(() => Cpu.PC == cartCheck, CartCheckTimeoutCycles,
                     action: () =>

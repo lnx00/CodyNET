@@ -73,6 +73,12 @@ public class Voice
     {
         _oscillator.ResetPhase();
     }
+    /// <summary>Silences the voice and clears its oscillator and envelope state.</summary>
+    public void PowerOnReset()
+    {
+        resetVoice();
+        _currentWave = 0;
+    }
     private void resetVoice()
     {
         ResetPhase();
