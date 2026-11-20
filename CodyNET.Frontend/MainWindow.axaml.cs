@@ -65,6 +65,10 @@ public partial class MainWindow : Window
     private ErrorLineRenderer? _errorLineRenderer;
     private readonly Dictionary<int, bool> _codeEditorBreakpointLines = new();
     private Dictionary<ushort, int> _addressToSourceLine = new();
+    /// <summary>Editor breakpoint line -> address the debugger breaks at for it. Only these lines are armed.</summary>
+    private readonly Dictionary<int, ushort> _armedBreakpoints = new();
+    /// <summary>Addresses the IDE registered with the debugger, so it can remove them again.</summary>
+    private readonly HashSet<ushort> _debuggerBreakpointAddresses = new();
     private List<string> _codeLines = [];
     private FileInfo originalAssemblyFile;
 
@@ -85,7 +89,7 @@ public partial class MainWindow : Window
 
     private void InitializeCodeEditor()
     {
-        _breakpointMargin = new BreakpointMargin(_codeEditorBreakpointLines, ToggleBreakpoint);
+        _breakpointMargin = new BreakpointMargin(_codeEditorBreakpointLines, _armedBreakpoints.ContainsKey, ToggleBreakpoint);
         CodeEditorTextBox.TextArea.LeftMargins.Insert(0, _breakpointMargin);
 
         CodeEditorTextBox.Document.TextChanged += OnCodeEditorDocumentTextChanged;
@@ -401,8 +405,78 @@ public partial class MainWindow : Window
         return targetHz > 0 && targetHz <= MaxCurrentLineHighlightFrequencyHz;   // <= 0 means unlimited
     }
 
+    /// <summary>
+    /// Pushes the editor breakpoints into the emulator's debugger as address breakpoints, so they take
+    /// effect immediately without re-assembling. Line -> address comes from the last assembly; a
+    /// breakpoint on a line without code (label, comment, blank) breaks at the next line that has code.
+    /// While the editor has changes that are not assembled yet, breakpoints that are already armed stay
+    /// armed (they match the program in memory), removing or disabling one still applies right away,
+    /// and new ones are armed by the next Assemble/Run.
+    /// </summary>
+    private void SyncBreakpointsToDebugger()
+    {
+        var debugger = FrontendHostBridge.Debugger;
+        if (debugger is null)
+        {
+            _armedBreakpoints.Clear();
+            return;
+        }
+
+        if (_addressToSourceLine.Count > 0) // Address map matches the editor text: re-resolve everything
+        {
+            var lineToAddress = new SortedDictionary<int, ushort>();
+            foreach (var (address, line) in _addressToSourceLine)
+            {
+                if (!lineToAddress.TryGetValue(line, out var existing) || address < existing)
+                    lineToAddress[line] = address;
+            }
+            var linesWithCode = lineToAddress.Keys.ToList();
+
+            _armedBreakpoints.Clear();
+            foreach (var line in _codeEditorBreakpointLines.Keys)
+            {
+                var index = linesWithCode.BinarySearch(line);
+                if (index < 0)
+                    index = ~index; // No code on this line: use the next line that has some
+                if (index < linesWithCode.Count)
+                    _armedBreakpoints[line] = lineToAddress[linesWithCode[index]];
+            }
+        }
+        else
+        {
+            foreach (var line in _armedBreakpoints.Keys.Where(l => !_codeEditorBreakpointLines.ContainsKey(l)).ToList())
+                _armedBreakpoints.Remove(line);
+        }
+
+        // Several lines can resolve to the same address; it breaks if any of them is enabled.
+        var wanted = new Dictionary<ushort, (bool Enabled, int Line)>();
+        foreach (var (line, address) in _armedBreakpoints.OrderBy(b => b.Key))
+        {
+            var enabled = _codeEditorBreakpointLines[line];
+            wanted[address] = wanted.TryGetValue(address, out var existing)
+                ? (existing.Enabled || enabled, existing.Line)
+                : (enabled, line);
+        }
+
+        foreach (var address in _debuggerBreakpointAddresses.Where(a => !wanted.ContainsKey(a)).ToList())
+        {
+            debugger.RemoveBreakpoint(address);
+            _debuggerBreakpointAddresses.Remove(address);
+        }
+
+        foreach (var (address, (enabled, line)) in wanted)
+        {
+            if (_debuggerBreakpointAddresses.Add(address))
+                debugger.AddBreakpoint(address, enabled, $"{GetLoadedAssemblyFileName()} line {line}");
+            else
+                debugger.SetBreakpointEnabled(address, enabled);
+        }
+    }
+
     private void RefreshBreakpointsPanel()
     {
+        SyncBreakpointsToDebugger();
+
         var breakpointsPanel = BreakpointsPanel;
         breakpointsPanel.Children.Clear();
 
@@ -924,6 +998,12 @@ public partial class MainWindow : Window
         deleteButton.Classes.Add("breakpoint-delete");
         deleteButton.Click += OnBreakpointDeleteClick;
         row.Children.Add(CreateBreakpointCell(deleteButton, 3));
+
+        var status = _armedBreakpoints.TryGetValue(line, out var address)
+            ? (enabled ? $"Active at ${address:X4}" : $"Disabled (${address:X4})")
+            : "Not active yet: takes effect after the next Assemble or Run";
+        ToolTip.SetTip(lineNumberText, status);
+
         BreakpointsPanel.Children.Add(new Border
         {
             Child = row,
@@ -1033,6 +1113,8 @@ public partial class MainWindow : Window
         }
 
         _codeEditorBreakpointLines.Clear();
+        _addressToSourceLine.Clear(); // Mapping belongs to the previous file
+        _armedBreakpoints.Clear();    // Its breakpoints are gone; the sync below removes them from the debugger
         _codeLines = codeLines;
         var sourceText = string.Join(Environment.NewLine, _codeLines);
 
@@ -1282,35 +1364,14 @@ public partial class MainWindow : Window
             .Select(l => l.TrimEnd('\r'))
             .ToList();
 
-        // Build finalCode and simultaneously track which pre.asm line number
-        // (after DBP expansion: each DBP -> STZ $FF00) maps to which editor line.
-        var finalCode = new List<string>();
+        // Breakpoints are not compiled in (they are address breakpoints in the debugger, see
+        // SyncBreakpointsToDebugger), and the preprocessor keeps lines 1:1, so pre.asm lines are editor lines.
         var preAsmLineToSourceLine = new Dictionary<int, int>();
-        int preAsmLine = 1;
-
-        for (int i = 0; i < editorLines.Count; i++)
-        {
-            var lineNumber = i + 1;
-            var lineText   = editorLines[i];
-
-            if (_codeEditorBreakpointLines.TryGetValue(lineNumber, out var enabled) && enabled)
-            {
-                // DBP -> "STZ $FF00" (1 line in pre.asm).
-                // Map both expansion lines to this editor line so the highlight appears
-                // when the emulator pauses at the breakpoint trap (STZ $FF00).
-                preAsmLineToSourceLine[preAsmLine] = lineNumber; // STZ $FF00
-                preAsmLine += 1;
-
-                finalCode.Add($"DBP ; BREAKPOINT LINE {lineNumber}");
-            }
-
-            preAsmLineToSourceLine[preAsmLine] = lineNumber;
-            preAsmLine++;
-            finalCode.Add(lineText);
-        }
+        for (int line = 1; line <= editorLines.Count; line++)
+            preAsmLineToSourceLine[line] = line;
 
         var inputFile = new FileInfo("editor.asm");
-        var sourceText = string.Join("\n", finalCode);
+        var sourceText = string.Join("\n", editorLines);
 
         // Assemble off the UI thread; any failure (bad syntax, missing 64tass, timeout, I/O)
         // is reported to the user instead of escaping the event handler and killing the app.
@@ -1331,6 +1392,7 @@ public partial class MainWindow : Window
                 if (preAsmLineToSourceLine.TryGetValue(preLine, out var sourceLine))
                     _addressToSourceLine[address] = sourceLine;
             }
+            RefreshBreakpointsPanel(); // Arms the breakpoints against the new addresses
 
             SetErrorList([], "Assembled successfully. No errors.");
             SendAssemblyOverUartButton.IsEnabled = true;

@@ -12,13 +12,21 @@ public class BreakpointMargin : AbstractMargin
 {
     private const double MarginWidth = 18.0;
     private static readonly IBrush BreakpointBrush = new SolidColorBrush(Color.Parse("#E84D4D"));
+    private static readonly IPen PendingPen = new Pen(BreakpointBrush, 1.5);
+    private static readonly IPen DisabledPen = new Pen(new SolidColorBrush(Color.Parse("#8191B0")), 1.5);
 
     private readonly Dictionary<int, bool> _breakpoints;
+    private readonly Func<int, bool> _isArmed;
     private readonly Action<int> _onToggle;
 
-    public BreakpointMargin(Dictionary<int, bool> breakpoints, Action<int> onToggle)
+    /// <param name="breakpoints">Editor line -> enabled.</param>
+    /// <param name="isArmed">Whether the breakpoint on a line is active in the debugger. Enabled breakpoints
+    /// that are not armed yet (program not assembled since) are drawn as a ring instead of a dot.</param>
+    /// <param name="onToggle">Called with the line that was clicked.</param>
+    public BreakpointMargin(Dictionary<int, bool> breakpoints, Func<int, bool> isArmed, Action<int> onToggle)
     {
         _breakpoints = breakpoints;
+        _isArmed = isArmed;
         _onToggle = onToggle;
         Cursor = new Cursor(StandardCursorType.Hand);
     }
@@ -55,7 +63,8 @@ public class BreakpointMargin : AbstractMargin
 
         foreach (var line in textView.VisualLines)
         {
-            if (!_breakpoints.ContainsKey(line.FirstDocumentLine.LineNumber))
+            var lineNumber = line.FirstDocumentLine.LineNumber;
+            if (!_breakpoints.TryGetValue(lineNumber, out var enabled))
                 continue;
 
             var y = line.VisualTop - scrollOffsetY;
@@ -63,10 +72,27 @@ public class BreakpointMargin : AbstractMargin
             var x = (MarginWidth - diameter) / 2;
             var cy = y + (line.Height - diameter) / 2;
 
-            context.FillRectangle(BreakpointBrush,
-                new Rect(x, cy, diameter, diameter),
-                (float)(diameter / 2));
+            if (!enabled)
+            {
+                DrawRing(context, DisabledPen, x, cy, diameter);
+            }
+            else if (_isArmed(lineNumber))
+            {
+                context.FillRectangle(BreakpointBrush,
+                    new Rect(x, cy, diameter, diameter),
+                    (float)(diameter / 2));
+            }
+            else
+            {
+                DrawRing(context, PendingPen, x, cy, diameter);
+            }
         }
+    }
+
+    private static void DrawRing(DrawingContext context, IPen pen, double x, double y, double diameter)
+    {
+        var radius = (diameter - pen.Thickness) / 2;
+        context.DrawEllipse(null, pen, new Point(x + diameter / 2, y + diameter / 2), radius, radius);
     }
 
     protected override void OnPointerPressed(PointerPressedEventArgs e)
