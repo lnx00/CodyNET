@@ -49,6 +49,12 @@ public partial class MainWindow : Window
     private static readonly long[] ClockStepFrequencies = [100_000, 500_000, 1_000_000, 2_000_000, 5_000_000, 10_000_000, -1];
     private static readonly string[] ClockStepLabels    = ["100 kHz", "500 kHz", "1 MHz", "2 MHz", "5 MHz", "10 MHz", "∞"];
 
+    /// <summary>
+    /// Highest clock frequency at which the current-line highlight is still shown while running.
+    /// Above this, the PC moves too fast to follow and the highlight just flickers between random lines.
+    /// </summary>
+    private const long MaxCurrentLineHighlightFrequencyHz = 1_000;
+
     private bool _isAssemblyDirty;
     private bool _suppressCodeEditorEvents;
     private bool _suppressClockSliderEvents;
@@ -351,8 +357,14 @@ public partial class MainWindow : Window
     {
         if (_currentLineRenderer is null) return;
 
-        _addressToSourceLine.TryGetValue(pc, out var sourceLine);  // 0 if not found
-        var newLine = sourceLine > 0 ? sourceLine : (int?)null;
+        var status = FrontendHostBridge.GetStatusSnapshot();
+
+        int? newLine = null;
+        if (ShouldShowCurrentLine(status))
+        {
+            _addressToSourceLine.TryGetValue(pc, out var sourceLine);  // 0 if not found
+            newLine = sourceLine > 0 ? sourceLine : null;
+        }
 
         if (_currentLineRenderer.CurrentLine == newLine) return;   // nothing changed
 
@@ -363,7 +375,6 @@ public partial class MainWindow : Window
         // because the PC jumps around too fast and would be distracting).
         if (newLine is not null)
         {
-            var status = FrontendHostBridge.GetStatusSnapshot();
             if (status?.RunStatus == RunStatus.Paused)
             {
                 // CodeEditorTextBox.TextArea.Caret.Line   = newLine.Value;
@@ -373,6 +384,21 @@ public partial class MainWindow : Window
                 CodeEditorTextBox.ScrollToLine(newLine.Value);
             }
         }
+    }
+
+    /// <summary>
+    /// The current-line highlight is only useful when the CPU is halted (paused, stepping, breakpoint)
+    /// or running slowly enough to follow. At full speed it just makes random lines blink.
+    /// </summary>
+    private static bool ShouldShowCurrentLine(CodyStatusSnapshot? status)
+    {
+        if (status is null)
+            return false;
+        if (status.RunStatus != RunStatus.Running)
+            return true;
+
+        var targetHz = status.ProfilerSnapshot?.TargetFrequency ?? 0;
+        return targetHz > 0 && targetHz <= MaxCurrentLineHighlightFrequencyHz;   // <= 0 means unlimited
     }
 
     private void RefreshBreakpointsPanel()
