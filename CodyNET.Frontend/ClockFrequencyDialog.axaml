@@ -28,7 +28,7 @@
 
         <TextBox x:Name="FrequencyInput"
                  PlaceholderText="e.g.  3.5 MHz,  500 kHz,  3500000"
-                 FontFamily="Cascadia Mono, Consolas, monospace"
+                 FontFamily="{StaticResource MonoFont}"
                  FontSize="14"
                  Background="#2B292E"
                  Foreground="#E7EAF2"

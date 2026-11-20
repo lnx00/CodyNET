@@ -39,16 +39,16 @@
         </Style>
         <Style Selector="TextBlock.data-hex">
             <Setter Property="FontSize" Value="15" />
-            <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, monospace" />
+            <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
             <Setter Property="Foreground" Value="#48FF88" />
         </Style>
         <Style Selector="TextBlock.data-dec">
             <Setter Property="FontSize" Value="15" />
-            <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, monospace" />
+            <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
             <Setter Property="Foreground" Value="#FFCC3E" />
         </Style>
         <Style Selector="TextBlock.code-text">
-            <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, monospace" />
+            <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
             <Setter Property="FontSize" Value="14" />
         </Style>
         <Style Selector="Button.breakpoint-delete">
@@ -116,7 +116,7 @@
             <Setter Property="Foreground" Value="#E7EAF2" />
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Padding" Value="4,4,32,8" />
-            <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, monospace" />
+            <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
             <Setter Property="FontSize" Value="14" />
             <Setter Property="LineHeight" Value="20" />
             <Setter Property="CaretBrush" Value="#E7EAF2" />
@@ -272,7 +272,7 @@
                                 <TextBox Grid.Column="1"
                                          x:Name="MemoryAddressInput"
                                          Text="0000"
-                                         FontFamily="Cascadia Mono, Consolas, monospace"
+                                         FontFamily="{StaticResource MonoFont}"
                                          FontSize="12"
                                          Height="26"
                                          MinHeight="26"
@@ -294,7 +294,7 @@
                                       x:Name="MemoryShortcutComboBox"
                                       Margin="0,6,0,0"
                                       HorizontalAlignment="Stretch"
-                                      FontFamily="Cascadia Mono, Consolas, monospace"
+                                      FontFamily="{StaticResource MonoFont}"
                                       FontSize="12"
                                       Height="26"
                                       MinHeight="26"
@@ -367,7 +367,7 @@
                                 <ScrollViewer HorizontalScrollBarVisibility="Auto"
                                               VerticalScrollBarVisibility="Auto">
                                     <SelectableTextBlock x:Name="MemoryDumpText"
-                                                         FontFamily="Cascadia Mono, Consolas, monospace"
+                                                         FontFamily="{StaticResource MonoFont}"
                                                          FontSize="12"
                                                          Foreground="#E7EAF2"
                                                          LineHeight="16" />
@@ -393,7 +393,7 @@
                             <ComboBox x:Name="ClockSpeedComboBox"
                                       SelectedIndex="2"
                                       VerticalAlignment="Center"
-                                      FontFamily="Cascadia Mono, Consolas, monospace"
+                                      FontFamily="{StaticResource MonoFont}"
                                       FontSize="13"
                                       SelectionChanged="OnClockComboBoxChanged"
                                       DropDownClosed="OnClockDropDownClosed">
@@ -408,7 +408,7 @@
                             </ComboBox>
 <TextBlock x:Name="ClockActualLabel"
                                        Foreground="#888"
-                                       FontFamily="Cascadia Mono, Consolas, monospace"
+                                       FontFamily="{StaticResource MonoFont}"
                                        FontSize="12"
                                        VerticalAlignment="Center" />
                         </StackPanel>
@@ -543,13 +543,13 @@
                                     <SplitButton.Flyout>
                                         <MenuFlyout Placement="BottomEdgeAlignedRight">
                                             <MenuItem x:Name="RunModeBasicItem"
-                                                      Header="Run via BASIC (reset, LOAD 1,1, UART)"
+                                                      Header="Run via BASIC"
                                                       ToggleType="Radio"
                                                       GroupName="RunMode"
                                                       IsChecked="True"
                                                       Click="OnRunModeClick" />
                                             <MenuItem x:Name="RunModeCartridgeItem"
-                                                      Header="Run as cartridge (load directly, skip BASIC)"
+                                                      Header="Run as cartridge"
                                                       ToggleType="Radio"
                                                       GroupName="RunMode"
                                                       Click="OnRunModeClick" />
@@ -561,7 +561,7 @@
                     </Border>
                     <Border Grid.Row="1" x:Name="CodeEditor" Classes="code-editor-shell">
                         <avaloniaEdit:TextEditor x:Name="CodeEditorTextBox"
-                                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                                 FontFamily="{StaticResource MonoFont}"
                                                  FontSize="14"
                                                  ShowLineNumbers="True"
                                                  LineNumbersForeground="#8191B0"

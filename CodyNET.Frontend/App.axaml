@@ -8,5 +8,8 @@
     </Application.Styles>
     <Application.Resources>
         <FontFamily x:Key="C64 Pro Mono">avares://GoogleFonts/Assets/Fonts#Nunito</FontFamily>
+        <!-- Bundled (SIL OFL, see Assets/Fonts/CascadiaMono-OFL.txt) so the editor and other
+             monospace text look the same on every OS; Linux usually has no Cascadia Mono or Consolas. -->
+        <FontFamily x:Key="MonoFont">avares://CodyNET.Frontend/Assets/Fonts#Cascadia Mono</FontFamily>
     </Application.Resources>
 </Application>
